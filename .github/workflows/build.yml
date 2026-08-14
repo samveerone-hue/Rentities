@@ -19,21 +19,26 @@ jobs:
           distribution: 'temurin'
           java-version: '25'
 
-      # Step 3: Setup Gradle, Wrapper Validation & Caching
+      # Step 3: Setup Gradle & Caching
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           cache-read-only: false
 
-      # Step 4: Grant execute permission for Gradle wrapper script
+      # Step 4: Grant execute permission for Gradle wrapper
       - name: Make gradlew Executable
         run: chmod +x ./gradlew
 
-      # Step 5: Build project and run tests
+      # Step 5: Replace corrupt gradle-wrapper.jar with a clean working copy
+      - name: Fix Corrupt Gradle Wrapper JAR
+        run: |
+          wget -O gradle/wrapper/gradle-wrapper.jar https://github.com/gradle/gradle/raw/v8.11.1/gradle/wrapper/gradle-wrapper.jar
+
+      # Step 6: Build project and run tests
       - name: Build with Gradle
         run: ./gradlew build --no-daemon
 
-      # Step 6: Upload build artifacts (.jar files)
+      # Step 7: Upload build artifacts (.jar files)
       - name: Upload Mod Artifacts
         uses: actions/upload-artifact@v4
         with:

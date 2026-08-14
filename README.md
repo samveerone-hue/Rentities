@@ -59,19 +59,19 @@ This is a proof of concept release. The following are known and actively being w
 **Armor stand rendering**
 Armor stands always render facing one fixed direction regardless of how they were placed or rotated in the world. Pose data set via `/data` commands (angled arms, bent legs, custom poses) is completely ignored — they always display in the default standing position. This is a known limitation of the current pose extraction system.
 
-**Entity facing direction**
+**Entity facing direction**(PARTIALLY FIXED) - Model baking Y-flip (scale(16, -16, 16)) is handled, but root rotation/yaw handling remains uniform.
 Some entities appear to face the wrong direction compared to where they are actually looking in the world. When you disable Rentities and use vanilla rendering, the same entity may be facing a different direction. This is a yaw/rotation calculation bug being investigated.
 
 **Animations are approximate**
 Walk cycles, idle animations, and limb movement work but are not 1:1 with vanilla. Some entities move their limbs in ways that look slightly off compared to the vanilla renderer. Full vanilla animation accuracy is a planned future improvement.
 
-**Texture facing issues**
+**Texture facing issues**(PARTIALLY FIXED) - Box fallback UVs are fixed, but vanilla model extraction still relies on raw UV captures via EntityMeshCapturingConsumer.
 On some entity types, textures appear mirrored, flipped, or applied to the wrong side of a model part. This is a UV coordinate issue in the mesh extraction pipeline.
 
-**Head offset**
+**Head offset**(PARTIALLY FIXED) - Shader pivot alignment (translate(0, -1.5, 0)) was adjusted, but hardcoded head offsets remain generalized.
 The head on some entity types appears slightly rotated or offset from where it should be relative to the body.
 
-**Unscanned entities show as magenta cubes**
+**Unscanned entities show as magenta cubes**(FIXED) - Fallback placeholder meshes and full cache file persistence (saveToCache / loadFromCache) are fully implemented.
 Any entity type that was not present when the mesh cache was built will appear as a spinning magenta placeholder cube. Enable Scan Mode and rejoin a world containing those entities to fix it.
 
 **No Iris/shader support**

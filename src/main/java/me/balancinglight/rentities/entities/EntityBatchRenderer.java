@@ -2,6 +2,9 @@ package me.balancinglight.rentities.entities;
 
 import me.balancinglight.rentities.Rentities;
 import me.balancinglight.rentities.gl.GlShader;
+import me.balancinglight.rentities.gl.GlStateGuard;
+import me.balancinglight.rentities.gl.GpuFenceRing;
+import me.balancinglight.rentities.gl.GpuRingBuffer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.EntityType;
 import org.joml.Matrix4f;
@@ -28,7 +31,9 @@ import static org.lwjgl.opengl.GL30C.GL_TEXTURE_2D_ARRAY;
 import static org.lwjgl.opengl.GL30C.glBindVertexArray;
 import static org.lwjgl.opengl.GL30C.GL_VERTEX_ARRAY_BINDING;
 import static org.lwjgl.opengl.GL20C.GL_CURRENT_PROGRAM;
+import static org.lwjgl.opengl.GL30C.glBindBufferRange;
 import static org.lwjgl.opengl.GL40C.glBindBufferBase;
+import static org.lwjgl.opengl.GL43C.glMultiDrawElementsIndirect;
 import static org.lwjgl.opengl.GL42C.GL_BUFFER_UPDATE_BARRIER_BIT;
 import static org.lwjgl.opengl.GL42C.glMemoryBarrier;
 import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BARRIER_BIT;
@@ -61,21 +66,32 @@ public class EntityBatchRenderer {
     private static final int PIVOT_SSBO_BINDING = 13;
     private int pivotSSBOId = 0;
     private boolean textureCacheLoaded = false;
+
+    /**
+     * Three slots is the sweet spot for a persistently mapped ring: two lets the CPU run
+     * exactly one frame ahead, which the driver's own queueing already consumes, while four
+     * or more only adds input latency and VRAM. With three, the CPU writes slot N while the
+     * GPU still reads N-1 and N-2, so the fence wait is a no-op in steady state.
+     */
     private static final int NUM_BUFFERS = 3;
     // Pre-allocated to avoid per-frame heap allocation
-    private final float[] vpFloats = new float[16]; // Triple buffering to prevent stalls
-    private final int[] ssboIds = new int[NUM_BUFFERS];
-    private final long[] ssboAddrs = new long[NUM_BUFFERS];
+    private final float[] vpFloats = new float[16];
+    private final GpuRingBuffer instanceRing;
+    private final GpuFenceRing fenceRing = new GpuFenceRing(NUM_BUFFERS);
+    private final EntityCullingPipeline cullPipeline;
+    private final GlStateGuard stateGuard = new GlStateGuard(
+            SSBO_BINDING, PIVOT_SSBO_BINDING,
+            EntityCullingPipeline.GROUP_SSBO_BINDING,
+            EntityCullingPipeline.CMD_SSBO_BINDING,
+            EntityCullingPipeline.VISIBLE_SSBO_BINDING);
     private int currentBufferIdx = 0;
-    
-    private final long[] fences = new long[NUM_BUFFERS];
-    private static final long FENCE_TIMEOUT_NS = 50_000_000L; // 50ms max wait
 
     private GlShader entityShader;
     private int uViewProjection = -1;
     private int uGameTime = -1;
     private int uEntityTextures = -1; // sampler2D uEntityTexture — bound per draw call
     private int uBaseInstance  = -1;
+    private int uIndirect      = -1;
 
     private final EntityMeshBaker meshBaker;
     private final EntityErrorRenderer errorRenderer;
@@ -91,18 +107,11 @@ public class EntityBatchRenderer {
         this.textureAtlas = new EntityTextureAtlas();
         this.skinCache = new EntitySkinCache();
 
-        // Allocate SSBOs (persistently mapped, triple buffered)
-        for (int i = 0; i < NUM_BUFFERS; i++) {
-            ssboIds[i] = glCreateBuffers();
-            // No GL_CLIENT_STORAGE_BIT — that pins RAM and causes system memory pressure
-            glNamedBufferStorage(ssboIds[i], EntityInstance.SSBO_SIZE,
-                    GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT);
-            ssboAddrs[i] = nglMapNamedBufferRange(ssboIds[i], 0, EntityInstance.SSBO_SIZE,
-                    GL_MAP_PERSISTENT_BIT  // 0x0040
-                    | 0x0020              // GL_MAP_UNSYNCHRONIZED_BIT
-                    | 0x0010              // GL_MAP_FLUSH_EXPLICIT_BIT
-                    | GL_MAP_WRITE_BIT);  // 0x0002
-        }
+        // One immutable allocation, three slots, mapped once for the lifetime of the mod.
+        // No GL_CLIENT_STORAGE_BIT: that pins system RAM and pushes the driver towards a
+        // host copy per draw on NVIDIA.
+        this.instanceRing = new GpuRingBuffer(EntityInstance.SSBO_SIZE, NUM_BUFFERS, true);
+        this.cullPipeline = new EntityCullingPipeline(NUM_BUFFERS, EntityInstance.MAX_INSTANCES);
 
         extractionBuffer = MemoryUtil.nmemAlloc(EntityInstance.SSBO_SIZE);
         compileShader();
@@ -119,6 +128,21 @@ public class EntityBatchRenderer {
             INSTANCE.writeEntityInstance(
                 extractionBuffer + (long)idx * EntityInstance.STRIDE, state, x, y, z);
         }
+    }
+
+    /**
+     * Reserves a queue slot for {@code type} and returns the address to write its instance
+     * data to, or 0 if the queue is full. Used by the direct-from-{@code Entity} extraction
+     * path, which has no render state to hand to {@link #queueEntityStateDirect}.
+     */
+    public static long reserveInstance(EntityType<?> type) {
+        if (INSTANCE == null) return 0L;
+        int idx = queueSize.getAndIncrement();
+        if (idx >= MAX_QUEUE) return 0L;
+        queuedTypes[idx] = type;
+        extractionTypes[idx] = type;
+        queuedOriginalIndices[idx] = idx;
+        return extractionBuffer + (long) idx * EntityInstance.STRIDE;
     }
 
     public static void queueEntityState(Object state, double x, double y, double z) {
@@ -153,53 +177,14 @@ public class EntityBatchRenderer {
         // Sort by entity type for contiguous SSBO blocks
         sortByEntityType(count);
 
-        // Advance ring buffer index
+        // Advance the ring and wait for the GPU to finish with the slot we are about to
+        // overwrite. Skipping ahead to a "free" slot instead, as the previous revision did,
+        // silently reorders frames and can write a slot whose fence has not been checked at
+        // all — a persistently mapped buffer gives no driver protection against that race.
         currentBufferIdx = (currentBufferIdx + 1) % NUM_BUFFERS;
         int bufIdx = currentBufferIdx;
+        fenceRing.waitFor(bufIdx);
 
-        // Try all 3 slots — find one the GPU has already finished with.
-        // Only hard-stall on the oldest slot as absolute last resort.
-        // This prevents the render thread from blocking on GPU work.
-        if (fences[bufIdx] != 0) {
-            int result = org.lwjgl.opengl.GL32C.glClientWaitSync(
-                fences[bufIdx], 0, 0L); // timeout=0 → non-blocking
-            if (result == org.lwjgl.opengl.GL32C.GL_TIMEOUT_EXPIRED
-                    || result == org.lwjgl.opengl.GL32C.GL_WAIT_FAILED) {
-                // Slot still in use — try next slot
-                int fallback = (bufIdx + 1) % NUM_BUFFERS;
-                if (fences[fallback] != 0) {
-                    result = org.lwjgl.opengl.GL32C.glClientWaitSync(
-                        fences[fallback], 0, 0L);
-                    if (result == org.lwjgl.opengl.GL32C.GL_ALREADY_SIGNALED
-                            || result == org.lwjgl.opengl.GL32C.GL_CONDITION_SATISFIED) {
-                        org.lwjgl.opengl.GL32C.glDeleteSync(fences[fallback]);
-                        fences[fallback] = 0;
-                        bufIdx = fallback;
-                        currentBufferIdx = bufIdx;
-                    } else {
-                        // Both slots busy — hard wait on oldest slot, max 2ms not 50ms
-                        // 2ms is one frame at 500fps; if we're here the GPU is genuinely behind
-                        result = org.lwjgl.opengl.GL32C.glClientWaitSync(
-                            fences[bufIdx],
-                            org.lwjgl.opengl.GL32C.GL_SYNC_FLUSH_COMMANDS_BIT,
-                            2_000_000L); // 2ms max
-                        org.lwjgl.opengl.GL32C.glDeleteSync(fences[bufIdx]);
-                        fences[bufIdx] = 0;
-                        if (result == org.lwjgl.opengl.GL32C.GL_TIMEOUT_EXPIRED
-                                && Rentities.IS_DEBUG) {
-                            Rentities.LOGGER.warn("[Entity] GPU fence timeout — all 3 SSBO slots busy");
-                        }
-                    }
-                } else {
-                    bufIdx = fallback;
-                    currentBufferIdx = bufIdx;
-                }
-            } else {
-                // Already done — free it
-                org.lwjgl.opengl.GL32C.glDeleteSync(fences[bufIdx]);
-                fences[bufIdx] = 0;
-            }
-        }
         textureAtlas.processUploads();
         skinCache.processUploads();
 
@@ -217,114 +202,111 @@ public class EntityBatchRenderer {
 
         if (storedViewProjection == null || entityShader == null) return;
 
-        // Copy extracted data to staging buffer in sorted order, write directly to mapped SSBO
+        // Sorted-order copy straight into the mapped slot. The mapping is coherent, so the
+        // writes become visible to the GPU without a flush call or a memory barrier; both
+        // would only add a driver round trip here.
+        long slotAddr = instanceRing.addrOf(bufIdx);
         for (int i = 0; i < count; i++) {
             int originalIdx = queuedOriginalIndices[i];
             MemoryUtil.memCopy(extractionBuffer + (long)originalIdx * EntityInstance.STRIDE,
-                               ssboAddrs[bufIdx] + (long)i * EntityInstance.STRIDE,
+                               slotAddr + (long)i * EntityInstance.STRIDE,
                                EntityInstance.STRIDE);
         }
 
-        // Flush only the range we actually wrote.
-        // glFlushMappedNamedBufferRange is sufficient for GL_MAP_COHERENT_BIT buffers —
-        // no glMemoryBarrier needed, which would stall the entire pipeline.
-        glFlushMappedNamedBufferRange(ssboIds[bufIdx], 0, (long) count * EntityInstance.STRIDE);
+        stateGuard.capture();
+        try {
+            // Bind shader and upload uniforms
+            entityShader.bind();
+            float[] vp = vpFloats;
+            if (storedViewProjection != null) storedViewProjection.get(vp);
+            glUniformMatrix4fv(uViewProjection, false, vp);
+            // uGameTime = ticks + partialTick — gives smooth 60fps+ animation in the shader
+            Minecraft mc = Minecraft.getInstance();
+            float partialTick = mc.getDeltaTracker().getGameTimeDeltaPartialTick(true);
+            float gameTime = mc.level != null
+                    ? (float)(mc.level.getGameTime() % 100000L) + partialTick
+                    : partialTick;
+            glUniform1f(uGameTime, gameTime);
 
-        // Save only what we change — 4 queries instead of 10
-        int prevVAO         = glGetInteger(GL_VERTEX_ARRAY_BINDING);
-        int prevProgram     = glGetInteger(GL_CURRENT_PROGRAM);
-        int prevDepthFunc   = glGetInteger(GL_DEPTH_FUNC);
-        boolean prevCull    = glIsEnabled(GL_CULL_FACE);
-        int prevActiveTexture = glGetInteger(GL_ACTIVE_TEXTURE);
-        int prevTex2DBinding  = glGetInteger(GL_TEXTURE_BINDING_2D);
+            // Bind SSBOs — texture binding happens per draw call in renderBySortedEntityType.
+            // Range binding, not base binding: the ring is one buffer object and the slot is an
+            // offset, so advancing a frame does not re-validate the buffer at the binding point.
+            glBindBufferRange(GL_SHADER_STORAGE_BUFFER, SSBO_BINDING, instanceRing.id(),
+                    instanceRing.offsetOf(bufIdx), instanceRing.slotSize());
+            if (pivotSSBOId != 0)
+                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, PIVOT_SSBO_BINDING, pivotSSBOId);
 
-        // Bind shader and upload uniforms
-        entityShader.bind();
-        float[] vp = vpFloats;
-        if (storedViewProjection != null) storedViewProjection.get(vp);
-        glUniformMatrix4fv(uViewProjection, false, vp);
-        // uGameTime = ticks + partialTick — gives smooth 60fps+ animation in the shader
-        Minecraft mc = Minecraft.getInstance();
-        float partialTick = mc.getDeltaTracker().getGameTimeDeltaPartialTick(true);
-        float gameTime = mc.level != null
-                ? (float)(mc.level.getGameTime() % 100000L) + partialTick
-                : partialTick;
-        glUniform1f(uGameTime, gameTime);
-
-        // Bind SSBOs — texture binding happens per draw call in renderBySortedEntityType
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, SSBO_BINDING, ssboIds[bufIdx]);
-        if (pivotSSBOId != 0)
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, PIVOT_SSBO_BINDING, pivotSSBOId);
-
-        if (Rentities.config.entity_batching_debug && count > 0 && (System.currentTimeMillis() % 2000 < 50)) {
-             float px = MemoryUtil.memGetFloat(ssboAddrs[bufIdx] + EntityInstance.OFFSET_POSITION_X);
-             float py = MemoryUtil.memGetFloat(ssboAddrs[bufIdx] + EntityInstance.OFFSET_POSITION_Y);
-             float pz = MemoryUtil.memGetFloat(ssboAddrs[bufIdx] + EntityInstance.OFFSET_POSITION_Z);
+            if (Rentities.config.entity_batching_debug && count > 0 && (System.currentTimeMillis() % 2000 < 50)) {
+                 float px = MemoryUtil.memGetFloat(slotAddr + EntityInstance.OFFSET_POSITION_X);
+                 float py = MemoryUtil.memGetFloat(slotAddr + EntityInstance.OFFSET_POSITION_Y);
+                 float pz = MemoryUtil.memGetFloat(slotAddr + EntityInstance.OFFSET_POSITION_Z);
              
-             // Calculate expected W for the first entity using standard matrix multiplication
-             float w = vp[3]*px + vp[7]*py + vp[11]*pz + vp[15];
-             // Standard NDC Z calculation
-             float z = vp[2]*px + vp[6]*py + vp[10]*pz + vp[14];
+                 // Calculate expected W for the first entity using standard matrix multiplication
+                 float w = vp[3]*px + vp[7]*py + vp[11]*pz + vp[15];
+                 // Standard NDC Z calculation
+                 float z = vp[2]*px + vp[6]*py + vp[10]*pz + vp[14];
              
-             Rentities.LOGGER.info("FLUSH: count={}, pos=({},{},{}), w_calc={}, z_calc={}, matrix=[{},{},{},{}; {},{},{},{}; {},{},{},{}; {},{},{},{}], VAO={}", 
-                 count, px, py, pz, w, z,
-                 vp[0], vp[1], vp[2], vp[3],
-                 vp[4], vp[5], vp[6], vp[7],
-                 vp[8], vp[9], vp[10], vp[11],
-                 vp[12], vp[13], vp[14], vp[15],
-                 meshBaker.getVaoId());
-        }
-
-        // Bind VAO and draw
-        int vaoId = meshBaker.getVaoId();
-        if (vaoId != 0) {
-            glBindVertexArray(vaoId);
-            
-            // Ensure correct GL state for entity rendering
-            glEnable(GL_DEPTH_TEST);
-            glDepthFunc(GL_LEQUAL); // Standard Z (Sodium does NOT use reverse-Z)
-            glDepthMask(true);
-            glDisable(GL_CULL_FACE);
-            glDisable(GL_SCISSOR_TEST);
-            glDisable(GL_STENCIL_TEST);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            
-            // Apply debug solid override
-            if (Rentities.config.entity_batching_debug_solid) {
-                glDisable(GL_BLEND);
+                 Rentities.LOGGER.info("FLUSH: count={}, pos=({},{},{}), w_calc={}, z_calc={}, matrix=[{},{},{},{}; {},{},{},{}; {},{},{},{}; {},{},{},{}], VAO={}", 
+                     count, px, py, pz, w, z,
+                     vp[0], vp[1], vp[2], vp[3],
+                     vp[4], vp[5], vp[6], vp[7],
+                     vp[8], vp[9], vp[10], vp[11],
+                     vp[12], vp[13], vp[14], vp[15],
+                     meshBaker.getVaoId());
             }
 
-            glColorMask(true, true, true, true);
+            // Bind VAO and draw
+            int vaoId = meshBaker.getVaoId();
+            if (vaoId != 0) {
+                glBindVertexArray(vaoId);
+            
+                // Ensure correct GL state for entity rendering
+                glEnable(GL_DEPTH_TEST);
+                glDepthFunc(GL_LEQUAL); // Standard Z (Sodium does NOT use reverse-Z)
+                glDepthMask(true);
+                glDisable(GL_CULL_FACE);
+                glDisable(GL_SCISSOR_TEST);
+                glDisable(GL_STENCIL_TEST);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            
+                // Apply debug solid override
+                if (Rentities.config.entity_batching_debug_solid) {
+                    glDisable(GL_BLEND);
+                }
 
-            renderBySortedEntityType(count);
+                glColorMask(true, true, true, true);
 
-            // Insert fence AFTER draw — signals when GPU finishes reading this buffer slot
-            fences[bufIdx] = org.lwjgl.opengl.GL32C.glFenceSync(
-                org.lwjgl.opengl.GL32C.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                boolean indirect = cullPipeline.isAvailable() && storedViewProjection != null;
+                if (indirect) {
+                    indirect = renderIndirect(count, bufIdx);
+                }
+                if (!indirect) {
+                    glUseProgram(entityShader.id);
+                    glUniform1i(uIndirect, 0);
+                    renderBySortedEntityType(count);
+                }
 
-            int err = glGetError();
-            if (err != 0) {
-                Rentities.LOGGER.error("GL ERROR during entity draw: 0x{}", Integer.toHexString(err));
+                // Fence AFTER the draws — signals when the GPU is done reading this slot
+                fenceRing.signal(bufIdx);
+
+                int err = glGetError();
+                if (err != 0) {
+                    Rentities.LOGGER.error("GL ERROR during entity draw: 0x{}", Integer.toHexString(err));
+                }
+            } else {
+                if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("FLUSH: meshBaker VAO is 0, skipping draw");
             }
-        } else {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("FLUSH: meshBaker VAO is 0, skipping draw");
+
+            // The error renderer runs inside the guarded region: it is part of the same pass and
+            // restoring state twice would double the glGet traffic for no benefit.
+            errorRenderer.flush(vp, gameTime);
+        } finally {
+            // Hand the context back exactly as it was found even if a draw threw, so Sodium's
+            // and Nvidium's state caches stay coherent with the real GL state. A leaked VAO or
+            // depth-mask setting here corrupts every later pass in the frame, not just ours.
+            stateGuard.restore();
         }
-
-        glBindVertexArray(prevVAO);
-        glUseProgram(prevProgram);
-        glDepthFunc(prevDepthFunc);
-        glDepthMask(true);
-        if (prevCull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glColorMask(true, true, true, true);
-        glActiveTexture(prevActiveTexture);
-        glBindTexture(GL_TEXTURE_2D, prevTex2DBinding);
-
-        // Flush glitch cubes — reuse already-computed vp float array
-        float[] vpArr = vp; // vp was already filled above — reuse, no new allocation
-        errorRenderer.flush(vpArr, gameTime);
 
         // Clear queued references to release entity render states
         for (int i = 0; i < count; i++) {
@@ -357,6 +339,72 @@ public class EntityBatchRenderer {
 
     private EntityType<?> getEntityTypeFromIdx(int idx) {
         return extractionTypes[idx];
+    }
+
+    private final EntityType<?>[] groupTypes = new EntityType[MAX_DRAW_GROUPS];
+    private static final int MAX_DRAW_GROUPS = 256;
+
+    /**
+     * GPU-culled indirect draw path.
+     *
+     * <p>The CPU walks the type-sorted queue once to emit one draw group per type, dispatches
+     * the cull, and then submits the commands the compute shader filled in. It never learns
+     * how many instances survived, so there is no readback and no fence between the cull and
+     * the draw — only a memory barrier.
+     *
+     * @return false if nothing could be submitted and the caller should fall back
+     */
+    private boolean renderIndirect(int count, int bufIdx) {
+        var meshInfoMap = meshBaker.getMeshInfoMap();
+        cullPipeline.begin(bufIdx);
+
+        int runStart = 0;
+        for (int i = 1; i <= count; i++) {
+            if (i < count && queuedTypes[i] == queuedTypes[runStart]) continue;
+
+            EntityType<?> type = queuedTypes[runStart];
+            var meshInfo = type != null ? meshInfoMap.get(type) : null;
+            if (meshInfo != null) {
+                int g = cullPipeline.addGroup(meshInfo.indexCount, meshInfo.indexOffset,
+                        runStart, i - runStart, type);
+                if (g < 0) break; // group table full — draw what fits, drop the tail
+                groupTypes[g] = type;
+            }
+            runStart = i;
+        }
+
+        int groups = cullPipeline.groupCount();
+        if (groups == 0) return false;
+
+        cullPipeline.dispatch(count, storedViewProjection);
+
+        glUseProgram(entityShader.id);
+        glUniform1i(uIndirect, 1);
+        cullPipeline.bindForDraw();
+
+        // Consecutive groups sharing a texture collapse into a single multi-draw. Today most
+        // entity types have their own texture so runs are short, but once the mesh baker moves
+        // types onto a shared atlas the whole frame becomes one call without touching this
+        // loop. Runs are keyed on the texture's ResourceLocation rather than its GL name: the
+        // location is stable and needs no GL call to compare, so the run can be detected
+        // before its texture is bound. Binding first and comparing handles afterwards would
+        // draw each run with the *next* run's texture.
+        int runFirst = 0;
+        Object runLoc = entityTextureLocs.get(groupTypes[0]);
+        for (int g = 1; g <= groups; g++) {
+            Object loc = g < groups ? entityTextureLocs.get(groupTypes[g]) : null;
+            if (g < groups && java.util.Objects.equals(loc, runLoc)) continue;
+
+            bindEntityTexture(groupTypes[runFirst]);
+            glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT,
+                    cullPipeline.indirectOffset(runFirst), g - runFirst,
+                    EntityCullingPipeline.CMD_STRIDE);
+            runFirst = g;
+            runLoc = loc;
+        }
+
+        for (int g = 0; g < groups; g++) groupTypes[g] = null;
+        return true;
     }
 
     private void renderBySortedEntityType(int count) {
@@ -663,11 +711,12 @@ public class EntityBatchRenderer {
         }
     }
 
-    private void bindEntityTexture(EntityType<?> type) {
-        Object loc = entityTextureLocs.get(type);
-        if (loc == null) return;
+    /** Binds the entity type's texture to unit 0 and returns the GL name, or 0 on failure. */
+    private int bindEntityTexture(EntityType<?> type) {
+        Object loc = type != null ? entityTextureLocs.get(type) : null;
+        if (loc == null) return 0;
         ensureTexMethodsCached();
-        if (cachedTextureManager == null) return;
+        if (cachedTextureManager == null) return 0;
         resolveTexMethods(loc);
         try {
             // Step 1: bind via MC texture manager (registers texture if needed)
@@ -700,7 +749,7 @@ public class EntityBatchRenderer {
                                     glUniform1i(uEntityTextures, 0);
                                     if (Rentities.IS_DEBUG)
                                         Rentities.LOGGER.info("Bound glId={} for {}", glId, type);
-                                    return;
+                                    return glId;
                                 }
                             }
                         }
@@ -721,10 +770,12 @@ public class EntityBatchRenderer {
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, glId);
                 glUniform1i(uEntityTextures, 0);
+                return glId;
             }
         } catch (Exception e) {
             if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("bindEntityTexture failed: {}", e.getMessage());
         }
+        return 0;
     }
 
 
@@ -828,6 +879,7 @@ public class EntityBatchRenderer {
             uGameTime       = entityShader.getUniformLocation("uGameTime");
             uEntityTextures = entityShader.getUniformLocation("uEntityTexture");
             uBaseInstance   = entityShader.getUniformLocation("uBaseInstance");
+            uIndirect       = entityShader.getUniformLocation("uIndirect");
             glUseProgram(0);
         } catch (Exception e) {
             Rentities.LOGGER.error("Entity shader compilation failed", e);
@@ -856,12 +908,9 @@ public class EntityBatchRenderer {
 
     public void delete() {
         if (entityShader != null) entityShader.delete();
-        for (int i = 0; i < NUM_BUFFERS; i++) {
-            if (ssboIds[i] != 0) {
-                glUnmapNamedBuffer(ssboIds[i]);
-                glDeleteBuffers(ssboIds[i]);
-            }
-        }
+        fenceRing.deleteAll();
+        instanceRing.delete();
+        cullPipeline.delete();
         if (extractionBuffer != 0) MemoryUtil.nmemFree(extractionBuffer);
         meshBaker.delete();
         errorRenderer.delete();

@@ -585,7 +585,7 @@ public class EntityBatchRenderer {
         lastBoundGlTexId = glId;
     }
 
-    private void compileShader() {
+    public void writeEntityInstance(long ptr, Object state, double rx, double ry, double rz) {
         if (state == null) return;
         StateAccessor acc = ACCESSOR_CACHE.get(state.getClass());
         try {

@@ -4,6 +4,7 @@ import me.balancinglight.rentities.Rentities;
 import me.balancinglight.rentities.entities.EntityBatchRenderer;
 import me.balancinglight.rentities.entities.EntityBatchRegistry;
 import me.balancinglight.rentities.entities.EntityAnimationCategory;
+import me.balancinglight.rentities.entities.EntityDirectExtractor;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.EntityType;
 import org.spongepowered.asm.mixin.Mixin;
@@ -26,6 +27,13 @@ public abstract class MixinEntityRenderDispatcher {
 
         if (!Rentities.IS_ENABLED) return;
         if (state == null) return;
+
+        // Already queued by the direct extraction hook — nothing was ever populated on this
+        // object, so bail out before anything reads it.
+        if (state == EntityDirectExtractor.SENTINEL) {
+            ci.cancel();
+            return;
+        }
 
         EntityType<?> type = EntityBatchRenderer.getEntityType(state);
         if (type == null) return;
@@ -149,4 +157,3 @@ public abstract class MixinEntityRenderDispatcher {
     }
 
 }
-

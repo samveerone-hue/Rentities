@@ -1,1117 +1,790 @@
 package me.balancinglight.rentities.entities;
 
-import com.mojang.blaze3d.vertex.PoseStack;
-import com.mojang.blaze3d.vertex.VertexConsumer;
 import me.balancinglight.rentities.Rentities;
+import me.balancinglight.rentities.gl.GlShader;
+import me.balancinglight.rentities.gl.GlStateGuard;
+import me.balancinglight.rentities.gl.GpuFenceRing;
+import me.balancinglight.rentities.gl.GpuRingBuffer;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.model.EntityModel;
-import net.minecraft.client.model.geom.ModelPart;
-import net.minecraft.client.renderer.entity.EntityRenderer;
-import net.minecraft.client.renderer.entity.LivingEntityRenderer;
 import net.minecraft.world.entity.EntityType;
-import org.lwjgl.system.MemoryUtil;
 import org.joml.Matrix4f;
+import org.lwjgl.system.MemoryUtil;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
-import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.lwjgl.opengl.GL11C.GL_FLOAT;
-import static org.lwjgl.opengl.GL15C.GL_STATIC_DRAW;
-import static org.lwjgl.opengl.GL30C.*;
-import static org.lwjgl.opengl.GL45C.*;
+import static org.lwjgl.opengl.GL11C.*;
+import static org.lwjgl.opengl.GL13C.GL_ACTIVE_TEXTURE;
+import static org.lwjgl.opengl.GL13C.GL_TEXTURE0;
+import static org.lwjgl.opengl.GL13C.glActiveTexture;
+import static org.lwjgl.opengl.GL20C.glGetUniformLocation;
+import static org.lwjgl.opengl.GL20C.glUniform1f;
+import static org.lwjgl.opengl.GL20C.glUniform1i;
+import static org.lwjgl.opengl.GL20C.glUniformMatrix4fv;
+import static org.lwjgl.opengl.GL20C.glUseProgram;
+import static org.lwjgl.opengl.GL30C.glBindVertexArray;
+import static org.lwjgl.opengl.GL30C.glBindBufferRange;
+import static org.lwjgl.opengl.GL43C.glMultiDrawElementsIndirect;
+import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER;
+import static org.lwjgl.opengl.GL31C.glDrawElementsInstanced;
 
-// Extracts entity meshes from vanilla renderers and bakes them into a shared GPU VBO.
-public class EntityMeshBaker {
+public class EntityBatchRenderer {
 
-    public static final int VERTEX_STRIDE = 36; // 9 floats × 4 bytes
-    public static final int MAX_BONES        = 8;
-    public static final int MAX_ENTITY_TYPES = 256;
+    public static EntityBatchRenderer INSTANCE;
 
-    // Pivot data: [typeIdx * MAX_BONES + boneIdx] * 4 floats (x,y,z,0)
-    // Populated during baking, uploaded to GPU as a static SSBO.
-    private final float[] bonePivotData = new float[MAX_ENTITY_TYPES * MAX_BONES * 4];
-    private int pivotSSBOId = 0;
-    private int currentBakingTypeIdx = -1; // set per-type during bake loop
+    private static final int MAX_QUEUE = EntityInstance.MAX_INSTANCES;
+    private static final EntityType<?>[] queuedTypes = new EntityType[MAX_QUEUE];
+    private static final EntityType<?>[] extractionTypes = new EntityType[MAX_QUEUE];
+    private static final int[] queuedOriginalIndices = new int[MAX_QUEUE];
+    private static final AtomicInteger queueSize = new AtomicInteger(0);
+    private static long extractionBuffer;
 
-    private int vaoId;
-    private int vboId;
-    private int eboId;
+    // Stored VP matrix from terrain render pass
+    public static org.joml.Matrix4f storedViewProjection;
 
-    public static class MeshInfo {
-        public final int vertexOffset; // byte offset in VBO
-        public final int indexOffset;  // byte offset in EBO
-        public final int indexCount;
+    private static final int SSBO_BINDING = 12;
+    private boolean textureCacheLoaded = false;
+    private boolean passPrepared = false;
+    private int lastBoundGlTexId = 0;
 
-        public MeshInfo(int vertexOffset, int indexOffset, int indexCount) {
-            this.vertexOffset = vertexOffset;
-            this.indexOffset = indexOffset;
-            this.indexCount = indexCount;
-        }
+    /**
+     * Three slots is the sweet spot for a persistently mapped ring: two lets the CPU run
+     * exactly one frame ahead, which the driver's own queueing already consumes, while four
+     * or more only adds input latency and VRAM. With three, the CPU writes slot N while the
+     * GPU still reads N-1 and N-2, so the fence wait is a no-op in steady state.
+     */
+    private static final int NUM_BUFFERS = 3;
+    // Pre-allocated to avoid per-frame heap allocation
+    private final float[] vpFloats = new float[16];
+    private final GpuRingBuffer instanceRing;
+    private final GpuFenceRing fenceRing = new GpuFenceRing(NUM_BUFFERS);
+    private final EntityCullingPipeline cullPipeline;
+    private final GlStateGuard stateGuard = new GlStateGuard(
+            SSBO_BINDING,
+            EntityCullingPipeline.GROUP_SSBO_BINDING,
+            EntityCullingPipeline.CMD_SSBO_BINDING,
+            EntityCullingPipeline.VISIBLE_SSBO_BINDING);
+    private int currentBufferIdx = 0;
+
+    private GlShader entityShader;
+    private int uViewProjection = -1;
+    private int uGameTime = -1;
+    private int uEntityTextures = -1; // sampler2D uEntityTexture — bound per draw call
+    private int uBaseInstance  = -1;
+    private int uIndirect      = -1;
+
+    private final EntityMeshBaker meshBaker;
+    private final EntityErrorRenderer errorRenderer;
+    private final EntityTextureAtlas textureAtlas;
+    private final EntitySkinCache skinCache;
+
+    private static final Map<Class<?>, Map<String, Field>> fieldCache = new ConcurrentHashMap<>();
+
+    // Entity type -> texture ResourceLocation; GL ids cached separately in entityGlTexIds
+    public final java.util.Map<EntityType<?>, Object> entityTextureLocs = new ConcurrentHashMap<>();
+    public final java.util.Map<EntityType<?>, Integer> entityGlTexIds = new ConcurrentHashMap<>();
+    public final java.util.Set<EntityType<?>> entityTexFailed = java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
+
+    // Cached TextureManager method for binding textures - resolved once at first use
+    private java.lang.reflect.Method cachedBindTexMethod = null;
+    private java.lang.reflect.Method cachedGetTexMethod = null;
+    private Object cachedTextureManager = null;
+
+    public EntityBatchRenderer() {
+        INSTANCE = this;
+        this.meshBaker = new EntityMeshBaker();
+        this.errorRenderer = new EntityErrorRenderer();
+        this.textureAtlas = new EntityTextureAtlas();
+        this.skinCache = new EntitySkinCache();
+
+        // One immutable allocation, three slots, mapped once for the lifetime of the mod.
+        // No GL_CLIENT_STORAGE_BIT: that pins system RAM and pushes the driver towards a
+        // host copy per draw on NVIDIA.
+        this.instanceRing = new GpuRingBuffer(EntityInstance.SSBO_SIZE, NUM_BUFFERS, true);
+        this.cullPipeline = new EntityCullingPipeline(NUM_BUFFERS, EntityInstance.MAX_INSTANCES);
+
+        extractionBuffer = MemoryUtil.nmemAlloc(EntityInstance.SSBO_SIZE);
+        compileShader();
     }
 
-    private final Map<EntityType<?>, MeshInfo> meshInfoMap = new HashMap<>();
-    private boolean baked = false;
-
-    // Bone name → bone index maps per category
-    // These match vanilla ModelPart child names exactly
-    private static final Map<String, Integer> BIPED_BONES = new LinkedHashMap<>();
-    private static final Map<String, Integer> QUADRUPED_BONES = new LinkedHashMap<>();
-    private static final Map<String, Integer> HORSE_BONES = new LinkedHashMap<>();
-    private static final Map<String, Integer> BIRD_BONES = new LinkedHashMap<>();
-    private static final Map<String, Integer> ARTHROPOD_BONES = new LinkedHashMap<>();
-    private static final Map<String, Integer> INSECT_BONES = new LinkedHashMap<>();
-    private static final Map<String, Integer> WORM_BONES = new LinkedHashMap<>();
-    private static final Map<String, Integer> FISH_BONES = new LinkedHashMap<>();
-    private static final Map<String, Integer> SLIME_BONES = new LinkedHashMap<>();
-    private static final Map<String, Integer> GHAST_BONES = new LinkedHashMap<>();
-    private static final Map<String, Integer> CREEPER_BONES = new LinkedHashMap<>();
-
-    static {
-        // Vanilla ModelPart child names from decompiled sources
-        BIPED_BONES.put("head",       0);
-        BIPED_BONES.put("hat",        0); // same bone as head
-        BIPED_BONES.put("body",       1);
-        BIPED_BONES.put("left_arm",   2);
-        BIPED_BONES.put("right_arm",  3);
-        BIPED_BONES.put("left_leg",   4);
-        BIPED_BONES.put("right_leg",  5);
-        // Iron golem extras — still use closest bone
-        BIPED_BONES.put("nose",       0);
-        BIPED_BONES.put("left_ear",   0);
-        BIPED_BONES.put("beard",      1);
-
-        QUADRUPED_BONES.put("head",       0);
-        QUADRUPED_BONES.put("body",       1);
-        QUADRUPED_BONES.put("leg1",       2); // front left
-        QUADRUPED_BONES.put("leg2",       3); // front right
-        QUADRUPED_BONES.put("leg3",       4); // back left
-        QUADRUPED_BONES.put("leg4",       5); // back right
-        // 1.21.11 names
-        QUADRUPED_BONES.put("left_front_leg",  2);
-        QUADRUPED_BONES.put("right_front_leg", 3);
-        QUADRUPED_BONES.put("left_hind_leg",   4);
-        QUADRUPED_BONES.put("right_hind_leg",  5);
-        // More variants
-        QUADRUPED_BONES.put("left_front_leg_tip",  2);
-        QUADRUPED_BONES.put("right_front_leg_tip", 3);
-        QUADRUPED_BONES.put("left_hind_leg_tip",   4);
-        QUADRUPED_BONES.put("right_hind_leg_tip",  5);
-        QUADRUPED_BONES.put("tail",       1); // tail = body bone
-        QUADRUPED_BONES.put("mane",       0);
-        QUADRUPED_BONES.put("upper_body", 1);
-
-        HORSE_BONES.put("head",        0);
-        HORSE_BONES.put("body",        1);
-        HORSE_BONES.put("front_left_leg",  2);
-        HORSE_BONES.put("front_right_leg", 3);
-        HORSE_BONES.put("back_left_leg",   4);
-        HORSE_BONES.put("back_right_leg",  5);
-        HORSE_BONES.put("tail",        6);
-        HORSE_BONES.put("neck",        0);
-        HORSE_BONES.put("mane",        0);
-        HORSE_BONES.put("left_ear",    0);
-        HORSE_BONES.put("right_ear",   0);
-
-        BIRD_BONES.put("head",       0);
-        BIRD_BONES.put("body",       1);
-        BIRD_BONES.put("left_wing",  2);
-        BIRD_BONES.put("right_wing", 3);
-        BIRD_BONES.put("left_leg",   4);
-        BIRD_BONES.put("right_leg",  5);
-        BIRD_BONES.put("beak",       0);
-        BIRD_BONES.put("left_foot",  4);
-        BIRD_BONES.put("right_foot", 5);
-
-        ARTHROPOD_BONES.put("head",        0);
-        ARTHROPOD_BONES.put("body",        1);
-        ARTHROPOD_BONES.put("right_middle_front_leg", 2);
-        ARTHROPOD_BONES.put("left_middle_front_leg",  3);
-        ARTHROPOD_BONES.put("right_middle_leg",  4);
-        ARTHROPOD_BONES.put("left_middle_leg",   5);
-        ARTHROPOD_BONES.put("right_back_leg",    6);
-        ARTHROPOD_BONES.put("left_back_leg",     7);
-
-        INSECT_BONES.put("body",          0);
-        INSECT_BONES.put("torso",         0);
-        INSECT_BONES.put("right_wing",    1);
-        INSECT_BONES.put("left_wing",     2);
-        INSECT_BONES.put("front_legs",    3);
-        INSECT_BONES.put("middle_legs",   3);
-        INSECT_BONES.put("back_legs",     3);
-        INSECT_BONES.put("stinger",       0);
-        INSECT_BONES.put("left_antenna",  0);
-        INSECT_BONES.put("right_antenna", 0);
-
-        WORM_BONES.put("body",    0);
-        WORM_BONES.put("segment", 0);
-
-        FISH_BONES.put("body",     0);
-        FISH_BONES.put("tail",     1);
-        FISH_BONES.put("top_fin",  0);
-        FISH_BONES.put("back_fin", 0);
-
-        SLIME_BONES.put("cube",           0);
-        SLIME_BONES.put("inside_cube",    0);
-        SLIME_BONES.put("left_eye",       0);
-        SLIME_BONES.put("right_eye",      0);
-        SLIME_BONES.put("mouth",          0);
-
-        GHAST_BONES.put("body",       0);
-        GHAST_BONES.put("tentacle0",  1);
-        GHAST_BONES.put("tentacle1",  2);
-        GHAST_BONES.put("tentacle2",  3);
-        GHAST_BONES.put("tentacle3",  4);
-        GHAST_BONES.put("tentacle4",  5);
-        GHAST_BONES.put("tentacle5",  6);
-        GHAST_BONES.put("tentacle6",  7);
-        GHAST_BONES.put("tentacle7",  8);
-        GHAST_BONES.put("tentacle8",  9);
-
-        CREEPER_BONES.put("head",        0);
-        CREEPER_BONES.put("body",        1);
-        CREEPER_BONES.put("leg1",        2);
-        CREEPER_BONES.put("leg2",        3);
-        CREEPER_BONES.put("leg3",        4);
-        CREEPER_BONES.put("leg4",        5);
-    }
-
-    public void bake() {
-        if (baked) return;
-        baked = true;
-
-        // When cache exists and scan mode is OFF, skip the expensive extraction
-        // pipeline entirely and upload straight to GPU from the saved file.
-        if (!Rentities.config.entity_scan_mode && loadFromCache()) {
-            Rentities.LOGGER.info("[EntityCache] Using cached mesh data — skipping bake");
-            bootstrapTextures(Minecraft.getInstance().getEntityRenderDispatcher());
-            return;
+    public static void queueEntityStateDirect(Object state, double x, double y, double z,
+                                              EntityType<?> type) {
+        if (INSTANCE == null) return;
+        int idx = queueSize.getAndIncrement();
+        if (idx < MAX_QUEUE) {
+            queuedTypes[idx] = type;
+            extractionTypes[idx] = type;
+            queuedOriginalIndices[idx] = idx;
+            INSTANCE.writeEntityInstance(
+                extractionBuffer + (long)idx * EntityInstance.STRIDE, state, x, y, z);
         }
-
-        if (Rentities.IS_DEBUG) {
-            Rentities.LOGGER.info("Starting Entity Mesh Baking...");
-        }
-
-        List<float[]> allVertices = new ArrayList<>();
-        List<int[]> allIndices = new ArrayList<>();
-        int vertexCount = 0;
-        int indexCount = 0;
-
-        var dispatcher = Minecraft.getInstance().getEntityRenderDispatcher();
-        if (dispatcher == null) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.error("EntityRenderDispatcher is NULL — cannot bake meshes");
-            return;
-        }
-
-        if (Rentities.IS_DEBUG) {
-            Rentities.LOGGER.info("EntityRenderDispatcher found. Registry has {} types.", EntityBatchRegistry.REGISTRY_TYPES().size());
-        }
-
-        var consumer = new EntityMeshCapturingConsumer();
-        var poseStack = new PoseStack();
-
-        // Get the renderer map via reflection (field_4696 in 1.21.11 EntityRenderDispatcher)
-        Map<EntityType<?>, EntityRenderer<?, ?>> rendererMap = getRendererMap(dispatcher);
-
-        for (EntityType<?> type : EntityBatchRegistry.REGISTRY_TYPES()) {
-            EntityAnimationCategory category = EntityBatchRegistry.getCategory(type);
-            if (category == EntityAnimationCategory.CPU_ANIMATED) {
-                if (Rentities.IS_DEBUG) Rentities.LOGGER.info("Skipping CPU_ANIMATED type: {}", type);
-                continue;
-            }
-            currentBakingTypeIdx = EntityBatchRegistry.getEntityTypeIndex(type);
-
-            float[] vertices = null;
-
-            // Try real extraction from renderer
-            try {
-                EntityRenderer<?, ?> renderer = null;
-                if (rendererMap != null) {
-                    renderer = rendererMap.get(type);
-                }
-                
-                if (renderer == null) {
-                    if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("No renderer found in map for {}", type);
-                } else if (renderer instanceof LivingEntityRenderer livingRenderer) {
-                    vertices = extractFromLivingRenderer(livingRenderer, category, consumer, poseStack);
-                    if (Rentities.IS_DEBUG) {
-                        if (vertices != null) {
-                            Rentities.LOGGER.info("Successfully baked mesh for {}: {} vertices", type, vertices.length / 9);
-                        } else {
-                            Rentities.LOGGER.warn("Mesh extraction returned NULL for {}", type);
-                        }
-                    }
-                } else {
-                    if (Rentities.IS_DEBUG) {
-                        String rName = renderer != null ? renderer.getClass().getName() : "NULL";
-                        Rentities.LOGGER.warn("Renderer for {} is not a LivingEntityRenderer (is {})", type, rName);
-                    }
-                }
-            } catch (Exception e) {
-                if (Rentities.IS_DEBUG) {
-                    Rentities.LOGGER.error("Failed to bake real mesh for {}:", type, e);
-                }
-            }
-
-            // Fallback to placeholder if extraction failed
-            if (vertices == null || vertices.length == 0) {
-                if (Rentities.IS_DEBUG) {
-                    Rentities.LOGGER.warn("Using placeholder mesh for {}", type);
-                }
-                vertices = generatePlaceholderMesh(category);
-            }
-
-            int[] indices = generateIndices(vertices.length / 9, vertexCount);
-
-            int byteVertexOffset = vertexCount * VERTEX_STRIDE;
-            int byteIndexOffset = indexCount * 4;
-            meshInfoMap.put(type, new MeshInfo(byteVertexOffset, byteIndexOffset, indices.length));
-
-            allVertices.add(vertices);
-            allIndices.add(indices);
-            vertexCount += vertices.length / 9;
-            indexCount += indices.length;
-        }
-
-        if (Rentities.IS_DEBUG) {
-            Rentities.LOGGER.info("Baking complete. Total vertices: {}, Total indices: {}", vertexCount, indexCount);
-        }
-
-        uploadToGPU(allVertices, allIndices, vertexCount, indexCount);
-        bootstrapTextures(dispatcher, rendererMap);
-
-        // Always save after a fresh bake so next launch loads from cache.
-        // Resolve file path NOW on render thread before handing to background thread.
-        getCacheFile(); // ensure cacheFile is set while Minecraft.getInstance() is safe
-        final List<float[]> vFinal = allVertices;
-        final List<int[]>   iFinal = allIndices;
-        Thread saveThread = new Thread(() -> saveToCache(vFinal, iFinal), "rentities-cache-save");
-        saveThread.setDaemon(true);
-        saveThread.start();
-        // Texture atlas save needs to happen on the render thread (GL reads).
-        // Signal EntityBatchRenderer to save it on the next flush.
-        pendingTextureSave = true;
-    }
-
-    /** Set to true after bake to request a texture cache save from EntityBatchRenderer. */
-    public volatile boolean pendingTextureSave = false;
-
-    public void ensureTexturesBootstrapped() {
-        if (texturesBootstrapped) return;
-        bootstrapTextures(Minecraft.getInstance().getEntityRenderDispatcher());
-        texturesBootstrapped = true;
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Map<EntityType<?>, EntityRenderer<?, ?>> getRendererMap(
-            net.minecraft.client.renderer.entity.EntityRenderDispatcher dispatcher) {
-        if (cachedRendererMap != null) return cachedRendererMap;
-        if (dispatcher == null) return null;
-        try {
-            Field f = net.minecraft.client.renderer.entity.EntityRenderDispatcher.class.getDeclaredField("field_4696");
-            f.setAccessible(true);
-            cachedRendererMap = (Map<EntityType<?>, EntityRenderer<?, ?>>) f.get(dispatcher);
-            return cachedRendererMap;
-        } catch (Exception e) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.error("Failed to access renderer map: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    private static volatile Map<EntityType<?>, EntityRenderer<?, ?>> cachedRendererMap = null;
-
-    private boolean texturesBootstrapped = false;
-
-    private static void bootstrapTextures(net.minecraft.client.renderer.entity.EntityRenderDispatcher dispatcher) {
-        bootstrapTextures(dispatcher, getRendererMap(dispatcher));
-    }
-
-    private static void bootstrapTextures(
-            net.minecraft.client.renderer.entity.EntityRenderDispatcher dispatcher,
-            Map<EntityType<?>, EntityRenderer<?, ?>> rendererMap) {
-        if (dispatcher == null || rendererMap == null) return;
-        EntityBatchRenderer renderer = EntityBatchRenderer.INSTANCE;
-        if (renderer == null) return;
-        EntityTextureBootstrap.bootstrap(renderer, rendererMap);
     }
 
     /**
-     * Extracts geometry from a LivingEntityRenderer by walking its model's
-     * named children and rendering each into the capturing consumer.
+     * Reserves a queue slot for {@code type} and returns the address to write its instance
+     * data to, or 0 if the queue is full. Used by the direct-from-{@code Entity} extraction
+     * path, which has no render state to hand to {@link #queueEntityStateDirect}.
      */
-    @SuppressWarnings("rawtypes")
-    private float[] extractFromLivingRenderer(LivingEntityRenderer renderer,
-                                               EntityAnimationCategory category,
-                                               EntityMeshCapturingConsumer consumer,
-                                               PoseStack poseStack) {
-        if (Rentities.IS_DEBUG) Rentities.LOGGER.info("Extracting from renderer: {}", renderer.getClass().getName());
-        EntityModel model = getModelFromRenderer(renderer);
-        if (model == null) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.error("Could not find EntityModel in renderer {}", renderer.getClass().getName());
-            return null;
+    public static long reserveInstance(EntityType<?> type) {
+        if (INSTANCE == null) return 0L;
+        int idx = queueSize.getAndIncrement();
+        if (idx >= MAX_QUEUE) return 0L;
+        queuedTypes[idx] = type;
+        extractionTypes[idx] = type;
+        queuedOriginalIndices[idx] = idx;
+        return extractionBuffer + (long) idx * EntityInstance.STRIDE;
+    }
+
+    public static void queueEntityState(Object state, double x, double y, double z) {
+        if (INSTANCE == null) return;
+        int idx = queueSize.getAndIncrement();
+        if (idx < MAX_QUEUE) {
+            EntityType<?> type = getEntityType(state);
+            queuedTypes[idx] = type;
+            extractionTypes[idx] = type;
+            queuedOriginalIndices[idx] = idx;
+            INSTANCE.writeEntityInstance(extractionBuffer + (long)idx * EntityInstance.STRIDE, state, x, y, z);
+        }
+    }
+
+    public static void beginWorldRender(Matrix4f positionMatrix, Matrix4f projectionMatrix) {
+        if (INSTANCE != null) INSTANCE.passPrepared = false;
+        setViewMatrix(positionMatrix);
+        updateProjectionMatrix(projectionMatrix);
+        prepareForEntityPass();
+    }
+
+    public static void ensurePrepared() {
+        if (INSTANCE != null && !INSTANCE.passPrepared) {
+            prepareForEntityPass();
+        }
+    }
+
+    public static void prepareForEntityPass() {
+        if (INSTANCE == null) return;
+        if (!INSTANCE.meshBaker.isBaked()) {
+            INSTANCE.meshBaker.bake();
+        }
+        INSTANCE.meshBaker.ensureTexturesBootstrapped();
+        INSTANCE.passPrepared = true;
+    }
+
+    public static void flushBatch() {
+        if (INSTANCE == null) return;
+        INSTANCE.doFlush();
+    }
+
+    private void doFlush() {
+        int count = Math.min(queueSize.getAndSet(0), MAX_QUEUE);
+        if (count == 0) return;
+
+        // Sort by entity type for contiguous SSBO blocks
+        sortByEntityType(count);
+
+        // Advance the ring and wait for the GPU to finish with the slot we are about to
+        // overwrite.
+        currentBufferIdx = (currentBufferIdx + 1) % NUM_BUFFERS;
+        int bufIdx = currentBufferIdx;
+        fenceRing.waitFor(bufIdx);
+
+        textureAtlas.processUploads();
+        skinCache.processUploads();
+
+        if (meshBaker.pendingTextureSave) {
+            meshBaker.pendingTextureSave = false;
+            textureAtlas.saveTextureCache();
         }
 
-        Map<String, Integer> boneMap = getBoneMap(category);
-        consumer.reset();
+        if (!textureCacheLoaded) {
+            textureCacheLoaded = true;
+            if (!Rentities.config.entity_scan_mode) {
+                textureAtlas.loadTextureCache();
+            }
+        }
 
-        // Get root ModelPart (the model itself is a ModelPart tree)
-        ModelPart root = getRootPart(model);
-        if (root == null) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("Root ModelPart is NULL for renderer {}", renderer.getClass().getName());
+        if (storedViewProjection == null || entityShader == null) return;
+
+        // Sorted-order copy straight into the mapped slot.
+        long slotAddr = instanceRing.addrOf(bufIdx);
+        for (int i = 0; i < count; i++) {
+            int originalIdx = queuedOriginalIndices[i];
+            MemoryUtil.memCopy(extractionBuffer + (long)originalIdx * EntityInstance.STRIDE,
+                               slotAddr + (long)i * EntityInstance.STRIDE,
+                               EntityInstance.STRIDE);
+        }
+
+        stateGuard.capture();
+        try {
+            // Bind shader and upload uniforms
+            entityShader.bind();
+            float[] vp = vpFloats;
+            if (storedViewProjection != null) storedViewProjection.get(vp);
+            glUniformMatrix4fv(uViewProjection, false, vp);
             
-            // Try fallback: check for any ModelPart field on the model itself
-            for (Field f : model.getClass().getDeclaredFields()) {
-                if (f.getType() == ModelPart.class) {
-                    try {
-                        f.setAccessible(true);
-                        root = (ModelPart) f.get(model);
-                        if (root != null) {
-                            if (Rentities.IS_DEBUG) Rentities.LOGGER.info("Found fallback root ModelPart in field {}", f.getName());
-                            break;
-                        }
-                    } catch (Exception ignored) {}
-                }
+            Minecraft mc = Minecraft.getInstance();
+            float partialTick = mc.getDeltaTracker().getGameTimeDeltaPartialTick(true);
+            float gameTime = mc.level != null
+                    ? (float)(mc.level.getGameTime() % 100000L) + partialTick
+                    : partialTick;
+            glUniform1f(uGameTime, gameTime);
+
+            // Bind SSBOs
+            glBindBufferRange(GL_SHADER_STORAGE_BUFFER, SSBO_BINDING, instanceRing.id(),
+                    instanceRing.offsetOf(bufIdx), instanceRing.slotSize());
+
+            if (Rentities.config.entity_batching_debug && count > 0 && (System.currentTimeMillis() % 2000 < 50)) {
+                 float px = MemoryUtil.memGetFloat(slotAddr + EntityInstance.OFFSET_POSITION_X);
+                 float py = MemoryUtil.memGetFloat(slotAddr + EntityInstance.OFFSET_POSITION_Y);
+                 float pz = MemoryUtil.memGetFloat(slotAddr + EntityInstance.OFFSET_POSITION_Z);
+             
+                 float w = vp[3]*px + vp[7]*py + vp[11]*pz + vp[15];
+                 float z = vp[2]*px + vp[6]*py + vp[10]*pz + vp[14];
+             
+                 Rentities.LOGGER.info("FLUSH: count={}, pos=({},{},{}), w_calc={}, z_calc={}, matrix=[{},{},{},{}; {},{},{},{}; {},{},{},{}; {},{},{},{}], VAO={}", 
+                     count, px, py, pz, w, z,
+                     vp[0], vp[1], vp[2], vp[3],
+                     vp[4], vp[5], vp[6], vp[7],
+                     vp[8], vp[9], vp[10], vp[11],
+                     vp[12], vp[13], vp[14], vp[15],
+                     meshBaker.getVaoId());
             }
+
+            // Bind VAO and draw
+            int vaoId = meshBaker.getVaoId();
+            if (vaoId != 0) {
+                glBindVertexArray(vaoId);
+            
+                // Ensure correct GL state for entity rendering
+                glEnable(GL_DEPTH_TEST);
+                glDepthFunc(GL_LEQUAL);
+                glDepthMask(true);
+                glDisable(GL_CULL_FACE);
+                glDisable(GL_SCISSOR_TEST);
+                glDisable(GL_STENCIL_TEST);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            
+                if (Rentities.config.entity_batching_debug_solid) {
+                    glDisable(GL_BLEND);
+                }
+
+                glColorMask(true, true, true, true);
+
+                lastBoundGlTexId = 0;
+
+                boolean indirect = cullPipeline.isAvailable() && storedViewProjection != null;
+                if (indirect) {
+                    indirect = renderIndirect(count, bufIdx);
+                }
+                if (!indirect) {
+                    glUseProgram(entityShader.id);
+                    glUniform1i(uIndirect, 0);
+                    renderBySortedEntityType(count);
+                }
+
+                fenceRing.signal(bufIdx);
+
+                if (Rentities.IS_DEBUG) {
+                    int err = glGetError();
+                    if (err != 0) {
+                        Rentities.LOGGER.error("GL ERROR during entity draw: 0x{}", Integer.toHexString(err));
+                    }
+                }
+            } else {
+                if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("FLUSH: meshBaker VAO is 0, skipping draw");
+            }
+
+            errorRenderer.flush(vp, gameTime);
+        } finally {
+            stateGuard.restore();
         }
 
-        if (root == null) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("Final root ModelPart is NULL for renderer {}", renderer.getClass().getName());
+        // Clear queued references
+        for (int i = 0; i < count; i++) {
+            queuedTypes[i] = null;
+            extractionTypes[i] = null;
+        }
+    }
+
+    public static void queueErrorEntity(double x, double y, double z) {
+        if (INSTANCE != null) INSTANCE.errorRenderer.queueError(x, y, z);
+    }
+
+    private final long[] sortKeys = new long[MAX_QUEUE];
+
+    private void sortByEntityType(int count) {
+        for (int i = 0; i < count; i++) {
+            EntityType<?> type = queuedTypes[i];
+            int typeIdx = type != null ? EntityBatchRegistry.getEntityTypeIndex(type) : 0;
+            sortKeys[i] = ((long) typeIdx << 32) | (queuedOriginalIndices[i] & 0xFFFFFFFFL);
+        }
+        java.util.Arrays.sort(sortKeys, 0, count);
+        for (int i = 0; i < count; i++) {
+            int originalIdx = (int) (sortKeys[i] & 0xFFFFFFFFL);
+            queuedOriginalIndices[i] = originalIdx;
+        }
+        for (int i = 0; i < count; i++) {
+            queuedTypes[i] = getEntityTypeFromIdx(queuedOriginalIndices[i]);
+        }
+    }
+
+    private EntityType<?> getEntityTypeFromIdx(int idx) {
+        return extractionTypes[idx];
+    }
+
+    private static final int MAX_DRAW_GROUPS = 256;
+    private final EntityType<?>[] groupTypes = new EntityType[MAX_DRAW_GROUPS];
+
+    private boolean renderIndirect(int count, int bufIdx) {
+        var meshInfoMap = meshBaker.getMeshInfoMap();
+        cullPipeline.begin(bufIdx);
+
+        int runStart = 0;
+        for (int i = 1; i <= count; i++) {
+            if (i < count && queuedTypes[i] == queuedTypes[runStart]) continue;
+
+            EntityType<?> type = queuedTypes[runStart];
+            var meshInfo = type != null ? meshInfoMap.get(type) : null;
+            if (meshInfo != null) {
+                int g = cullPipeline.addGroup(meshInfo.indexCount, meshInfo.indexOffset,
+                        runStart, i - runStart, type);
+                if (g < 0) break;
+                groupTypes[g] = type;
+            }
+            runStart = i;
+        }
+
+        int groups = cullPipeline.groupCount();
+        if (groups == 0) return false;
+
+        cullPipeline.dispatch(count, storedViewProjection);
+
+        glUseProgram(entityShader.id);
+        glUniform1i(uIndirect, 1);
+        cullPipeline.bindForDraw();
+
+        int runFirst = 0;
+        Object runLoc = entityTextureLocs.get(groupTypes[0]);
+        for (int g = 1; g <= groups; g++) {
+            Object loc = g < groups ? entityTextureLocs.get(groupTypes[g]) : null;
+            if (g < groups && java.util.Objects.equals(loc, runLoc)) continue;
+
+            bindEntityTexture(groupTypes[runFirst]);
+            glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT,
+                    cullPipeline.indirectOffset(runFirst), g - runFirst,
+                    EntityCullingPipeline.CMD_STRIDE);
+            runFirst = g;
+            runLoc = loc;
+        }
+
+        for (int g = 0; g < groups; g++) groupTypes[g] = null;
+        return true;
+    }
+
+    private void renderBySortedEntityType(int count) {
+        var meshInfoMap = meshBaker.getMeshInfoMap();
+        int instanceOffset = 0;
+        EntityType<?> currentType = null;
+        int currentCount = 0;
+
+        for (int i = 0; i <= count; i++) {
+            EntityType<?> type = (i < count) ? queuedTypes[i] : null;
+            if (type != currentType) {
+                if (currentType != null && currentCount > 0) {
+                    var meshInfo = meshInfoMap.get(currentType);
+                    if (meshInfo != null) {
+                        bindEntityTexture(currentType);
+                        glUniform1i(uBaseInstance, instanceOffset);
+                        if (Rentities.IS_DEBUG && (System.currentTimeMillis() % 2000 < 50)) {
+                            Rentities.LOGGER.info("DRAW: type={}, count={}, indexCount={}, indexOffset={}, baseInstance={}",
+                                currentType, currentCount, meshInfo.indexCount, meshInfo.indexOffset, instanceOffset);
+                        }
+                        glDrawElementsInstanced(
+                                GL_TRIANGLES, meshInfo.indexCount, GL_UNSIGNED_INT,
+                                (long)meshInfo.indexOffset, currentCount);
+                    } else {
+                        if (Rentities.IS_DEBUG) {
+                            Rentities.LOGGER.warn("SKIP_NO_MESH: type={}, count={} — no meshInfo found!", currentType, currentCount);
+                        }
+                    }
+                    instanceOffset += currentCount;
+                }
+                currentType = type;
+                currentCount = 1;
+            } else {
+                currentCount++;
+            }
+        }
+    }
+
+    public static double cameraX, cameraY, cameraZ;
+
+    public void setCamera(double x, double y, double z) {
+        cameraX = x;
+        cameraY = y;
+        cameraZ = z;
+    }
+
+    private static final Matrix4f lastViewMatrix = new Matrix4f();
+
+    public static void updateProjectionMatrix(Matrix4f projection) {
+        if (storedViewProjection == null) {
+            storedViewProjection = new Matrix4f();
+        }
+        projection.mul(lastViewMatrix, storedViewProjection);
+    }
+
+    public static void setViewMatrix(Matrix4f view) {
+        lastViewMatrix.set(view);
+        lastViewMatrix.m30(0.0f);
+        lastViewMatrix.m31(0.0f);
+        lastViewMatrix.m32(0.0f);
+    }
+
+    private static class StateAccessor {
+        final java.lang.invoke.MethodHandle yaw, limbSwing, limbSwingAmt, headYaw, headPitch, attackProgress;
+        final java.lang.invoke.MethodHandle deathTime, swimProgress, hurtTime, sneaking;
+        final java.lang.invoke.MethodHandle type, texture, invisible, onGround, inWater;
+
+        StateAccessor(Class<?> cls) {
+            this.yaw            = mhFloat(cls,   "field_53329", "yBodyRot", "M");
+            this.limbSwing      = mhFloat(cls,   "field_53446", "walkAnimationPos", "ab");
+            this.limbSwingAmt   = mhFloat(cls,   "field_53447", "walkAnimationSpeed", "ac");
+            this.headYaw        = mhFloat(cls,   "field_53448", "headYaw", "ad");
+            this.headPitch      = mhFloat(cls,   "field_53449", "headPitch", "ae");
+            this.attackProgress = mhFloat(cls,   "field_53450", "attackAnim", "af");
+            this.deathTime      = mhFloat(cls,   "field_53452", "deathTime", "ah");
+            this.swimProgress   = mhFloat(cls,   "field_53451", "swimAmount", "ag");
+            this.hurtTime       = mhBool(cls,    "field_53456", "isHurt", "al");
+            this.sneaking       = mhBool(cls,    "field_53455", "isSneaking", "ak");
+            this.type           = mhObj(cls,     "field_58171", "entityType", "H");
+            this.texture        = mhObj(cls,     "field_53336", "texture", "V");
+            this.invisible      = mhBool(cls,    "field_53333", "invisible", "Q");
+            this.onGround       = mhBool(cls,    "field_53334", "onGround", "R");
+            this.inWater        = mhBool(cls,    "field_53335", "inWater", "S");
+        }
+
+        private static java.lang.invoke.MethodHandle mhFloat(Class<?> cls, String... names) {
+            Field f = findField(cls, float.class, names);
+            if (f == null) return null;
+            try {
+                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
+                    .asType(java.lang.invoke.MethodType.methodType(float.class, Object.class));
+            } catch (Exception e) { return null; }
+        }
+
+        private static java.lang.invoke.MethodHandle mhBool(Class<?> cls, String... names) {
+            Field f = findField(cls, boolean.class, names);
+            if (f == null) return null;
+            try {
+                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
+                    .asType(java.lang.invoke.MethodType.methodType(boolean.class, Object.class));
+            } catch (Exception e) { return null; }
+        }
+
+        private static java.lang.invoke.MethodHandle mhObj(Class<?> cls, String... names) {
+            Field f = findField(cls, null, names);
+            if (f == null) return null;
+            try {
+                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
+                    .asType(java.lang.invoke.MethodType.methodType(Object.class, Object.class));
+            } catch (Exception e) { return null; }
+        }
+
+        private static Field findField(Class<?> cls, Class<?> type, String... names) {
+            for (String name : names) {
+                Class<?> c = cls;
+                while (c != null) {
+                    try {
+                        Field f = c.getDeclaredField(name);
+                        if (type == null || f.getType() == type) {
+                            f.setAccessible(true);
+                            return f;
+                        }
+                    } catch (NoSuchFieldException ignored) {}
+                    c = c.getSuperclass();
+                }
+            }
             return null;
         }
-
-        // Reset all bone rotations to bind pose
-        resetPose(root);
-
-        // Root transform derivation:
-        // - translateAndRotate() divides pivots by 16 (pixels → blocks)
-        // - Cube vertices are ALSO in block units after pose transform
-        // - Shader expects vertices in PIXEL units, Y-up, feet at y=0
-        //
-        // We need: final_y = -16 * block_y + 24
-        // i.e. scale Y by -16 (flip+scale back to pixels) then shift 24 pixels up
-        //
-        // Verified: arm_l pivot (5/16, 2/16, 0) → shader space (5, 22, 0) ✓
-        //           feet (−,12/16+12/16,−) = (−,1.5,−) → shader space y=0 ✓
-        //           head top (−,−8/16−0,−) = (−,−0.5,−) → shader space y=32 ✓
-        //
-        // In PoseStack (post-multiply): scale first, then translate in scaled space
-        poseStack.pushPose();
-        poseStack.scale(16.0f, -16.0f, 16.0f);   // scale up + flip Y
-        poseStack.translate(0.0f, -1.5f, 0.0f);   // shift so feet land at y=0
-
-        renderPartTree(root, boneMap, 0, consumer, poseStack, true);
-        
-        poseStack.popPose();
-
-        float[] captured = consumer.bakeAndReset();
-        if (Rentities.IS_DEBUG) {
-            if (captured.length > 0) {
-                Rentities.LOGGER.info("Extraction finished: captured {} vertices", captured.length / 9);
-            } else {
-                Rentities.LOGGER.warn("Extraction finished: captured 0 vertices!");
-            }
-        }
-        return captured.length > 0 ? captured : null;
     }
 
-    /**
-     * Recursively walks a ModelPart tree, rendering each named part
-     * with its assigned bone index from the bone map.
-     *
-     * KEY INVARIANT: Named bones are extracted in BONE-LOCAL space.
-     * The shader pivot math assumes each bone's vertices are centered
-     * at the bone's own origin (0,0,0 = pivot point). If we applied
-     * translateAndRotate() for named bones, the vertices would be in
-     * world/body space and the shader's pivot rotations would orbit wrongly.
-     *
-     * Non-named sub-parts (e.g. hat inside head) DO get their relative
-     * transform applied so their position within the bone is correct.
-     */
-    private void renderPartTree(ModelPart part, Map<String, Integer> boneMap,
-                                 int inheritedBone, EntityMeshCapturingConsumer consumer,
-                                 PoseStack poseStack, boolean isRoot) {
+    private static final ClassValue<StateAccessor> ACCESSOR_CACHE = new ClassValue<>() {
+        @Override protected StateAccessor computeValue(Class<?> type) { return new StateAccessor(type); }
+    };
+
+    private void ensureTexMethodsCached() {
+        if (cachedTextureManager != null) return;
         try {
-            Field childrenField = getChildrenField();
-            if (childrenField == null) return;
-
-            @SuppressWarnings("unchecked")
-            Map<String, ModelPart> children = (Map<String, ModelPart>) childrenField.get(part);
-            if (children == null) return;
-
-            if (isRoot) renderPartCubesDirectly(part, consumer, poseStack);
-
-            for (Map.Entry<String, ModelPart> entry : children.entrySet()) {
-                String name = entry.getKey();
-                ModelPart child = entry.getValue();
-                int boneIdx = boneMap.getOrDefault(name, inheritedBone);
-                consumer.setBone(boneIdx);
-                poseStack.pushPose();
-                child.translateAndRotate(poseStack);
-
-                // translateAndRotate() with reset pose (rotation=0) only applies the
-                // pivot translation.  After the root scale(16,-16,16)+translate(0,-1.5,0)
-                // the matrix's translation column gives the pivot in shader pixel space.
-                if (currentBakingTypeIdx >= 0 && currentBakingTypeIdx < MAX_ENTITY_TYPES
-                        && boneIdx >= 0 && boneIdx < MAX_BONES) {
-                    Matrix4f m = poseStack.last().pose();
-                    int base = (currentBakingTypeIdx * MAX_BONES + boneIdx) * 4;
-                    // Only write if not already set (first named bone wins per index)
-                    if (bonePivotData[base] == 0.0f && bonePivotData[base+1] == 0.0f && bonePivotData[base+2] == 0.0f) {
-                        bonePivotData[base]   = m.m30();
-                        bonePivotData[base+1] = m.m31();
-                        bonePivotData[base+2] = m.m32();
-                        bonePivotData[base+3] = 0.0f;
-                    }
-                }
-
-                renderPartCubesDirectly(child, consumer, poseStack);
-                renderPartTree(child, boneMap, boneIdx, consumer, poseStack, false);
-                poseStack.popPose();
-            }
+            var mc = Minecraft.getInstance();
+            if (mc == null) return;
+            var tm = mc.getTextureManager();
+            if (tm == null) return;
+            cachedTextureManager = tm;
         } catch (Exception e) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.error("renderPartTree error: {}", e.getMessage());
+            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("ensureTexMethodsCached failed: {}", e.getMessage());
         }
     }
 
-    private Field cachedChildrenField = null;
-    private Field getChildrenField() {
-        if (cachedChildrenField != null) return cachedChildrenField;
-        for (String name : new String[]{"field_3661", "children", "n"}) {
-            Field f = getCachedField(ModelPart.class, name);
-            if (f != null && Map.class.isAssignableFrom(f.getType())) {
-                cachedChildrenField = f;
-                return f;
-            }
-        }
-        for (Field f : ModelPart.class.getDeclaredFields()) {
-            if (Map.class.isAssignableFrom(f.getType())) {
-                f.setAccessible(true);
-                cachedChildrenField = f;
-                return f;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Renders the cubes of a ModelPart directly into the consumer.
-     * Avoids ModelPart.render() recursion and double-transform issues.
-     */
-    private void renderPartCubesDirectly(ModelPart part, EntityMeshCapturingConsumer consumer,
-                                   PoseStack poseStack) {
+    private void resolveTexMethods(Object loc) {
+        if (cachedBindTexMethod != null && cachedGetTexMethod != null) return;
+        if (cachedTextureManager == null) return;
         try {
-            // Get cubes list via reflection
-            // field_3663 = cubes (Yarn), c = cubes (Mojang)
-            Field cubesField = null;
-            for (String name : new String[]{"field_3663", "cubes", "m"}) {
-                cubesField = getCachedField(ModelPart.class, name);
-                if (cubesField != null && List.class.isAssignableFrom(cubesField.getType())) break;
+            String[] bindNames = {"method_4615", "bindTexture"};
+            String[] getNames  = {"method_4619", "getTexture", "method_4620"};
+            for (java.lang.reflect.Method m : cachedTextureManager.getClass().getMethods()) {
+                if (m.getParameterCount() != 1) continue;
+                if (!m.getParameterTypes()[0].isAssignableFrom(loc.getClass())) continue;
+                String name = m.getName();
+                for (String n : bindNames) if (n.equals(name)) { cachedBindTexMethod = m; break; }
+                for (String n : getNames)  if (n.equals(name)) { cachedGetTexMethod  = m; break; }
             }
+            if (Rentities.IS_DEBUG)
+                Rentities.LOGGER.info("Resolved tex methods: bind={} get={}",
+                    cachedBindTexMethod != null ? cachedBindTexMethod.getName() : "null",
+                    cachedGetTexMethod  != null ? cachedGetTexMethod.getName()  : "null");
+        } catch (Exception e) {
+            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("resolveTexMethods failed: {}", e.getMessage());
+        }
+    }
 
-            if (cubesField == null) {
-                // Fallback: search for any List field
-                for (Field f : ModelPart.class.getDeclaredFields()) {
-                    if (List.class.isAssignableFrom(f.getType())) {
-                        f.setAccessible(true);
-                        cubesField = f;
-                        break;
-                    }
-                }
-            }
+    /** Binds the entity type's texture to unit 0 and returns the GL name, or 0 on failure. */
+    private int bindEntityTexture(EntityType<?> type) {
+        if (type == null) return 0;
 
-            if (cubesField == null) return;
+        Integer cached = entityGlTexIds.get(type);
+        if (cached != null && cached > 0) {
+            bindTextureUnit0(cached);
+            return cached;
+        }
 
-            List<?> cubes = (List<?>) cubesField.get(part);
-            if (cubes == null || cubes.isEmpty()) return;
+        Object loc = entityTextureLocs.get(type);
+        if (loc == null) return 0;
 
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.info("Rendering {} cubes", cubes.size());
+        int glId = EntityGlTextureResolver.resolveGlId(loc);
+        if (glId > 0) {
+            entityGlTexIds.put(type, glId);
+            bindTextureUnit0(glId);
+            return glId;
+        }
 
-            // ModelPart.Cube.render(PoseStack.Entry, VertexConsumer, int, int, int)
-            // Intermediate name for Cube.render: method_32089
-            for (Object cube : cubes) {
-                try {
-                    Method m = null;
-                    // Search for any method with 5 parameters (PoseStack.Entry, VertexConsumer, int, int, int)
-                    for (Method cand : cube.getClass().getDeclaredMethods()) {
-                        if (cand.getParameterCount() == 5 && 
-                            VertexConsumer.class.isAssignableFrom(cand.getParameterTypes()[1])) {
-                            m = cand;
+        ensureTexMethodsCached();
+        if (cachedTextureManager == null) return 0;
+        resolveTexMethods(loc);
+        try {
+            if (cachedBindTexMethod != null)
+                cachedBindTexMethod.invoke(cachedTextureManager, loc);
+
+            if (cachedGetTexMethod != null) {
+                Object texObj = cachedGetTexMethod.invoke(cachedTextureManager, loc);
+                if (texObj != null) {
+                    Object gpuTex = null;
+                    for (java.lang.reflect.Method m : texObj.getClass().getMethods()) {
+                        if (m.getParameterCount() == 0
+                                && m.getReturnType().getSimpleName().equals("GpuTexture")) {
+                            gpuTex = m.invoke(texObj);
                             break;
                         }
                     }
-
-                    if (m != null) {
-                        m.setAccessible(true);
-                        // Parameters: (PoseStack.Entry, VertexConsumer, int, int, int)
-                        m.invoke(cube, poseStack.last(), consumer, 0xF000F0, 0, 0xFFFFFFFF);
-                    }
-                } catch (Exception e) { }
-            }
-        } catch (Exception e) { }
-    }
-
-    /**
-     * Extracts the EntityModel from a LivingEntityRenderer using reflection.
-     */
-    @SuppressWarnings("rawtypes")
-    private EntityModel getModelFromRenderer(LivingEntityRenderer renderer) {
-        // Try field named "model" first (official)
-        try {
-            Field f = renderer.getClass().getField("model");
-            f.setAccessible(true);
-            return (EntityModel) f.get(renderer);
-        } catch (Exception ignored) {}
-
-        // Then try "field_4744" (intermediary)
-        try {
-            Field f = getCachedField(renderer.getClass(), "field_4744");
-            if (f != null) return (EntityModel) f.get(renderer);
-        } catch (Exception ignored) {}
-
-        // Fallback: search for any EntityModel field
-        for (Field f : getAllFields(renderer.getClass())) {
-            if (EntityModel.class.isAssignableFrom(f.getType())) {
-                try {
-                    f.setAccessible(true);
-                    Object val = f.get(renderer);
-                    if (val != null) {
-                        if (Rentities.IS_DEBUG) Rentities.LOGGER.info("Found EntityModel field: {} in {}", f.getName(), renderer.getClass().getSimpleName());
-                        return (EntityModel) val;
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
-        return null;
-    }
-
-    private ModelPart getRootPart(EntityModel<?> model) {
-        if (model == null) return null;
-        
-        // Strategy 1: Search for any public method root()
-        try {
-            for (Method m : model.getClass().getMethods()) {
-                if (m.getName().equals("root") || m.getName().equals("method_62471") || m.getName().equals("a")) {
-                    if (m.getParameterCount() == 0 && m.getReturnType() == ModelPart.class) {
-                        ModelPart root = (ModelPart) m.invoke(model);
-                        if (root != null) return root;
-                    }
-                }
-            }
-        } catch (Exception ignored) {}
-
-        // Strategy 2: Search for ANY field of type ModelPart (prioritize name "root")
-        List<ModelPart> candidates = new ArrayList<>();
-        try {
-            Class<?> current = model.getClass();
-            while (current != null && current != Object.class) {
-                for (Field f : current.getDeclaredFields()) {
-                    if (f.getType() == ModelPart.class) {
-                        f.setAccessible(true);
-                        ModelPart part = (ModelPart) f.get(model);
-                        if (part != null) {
-                            if (f.getName().equalsIgnoreCase("root") || f.getName().equals("field_52912")) {
-                                return part; // Highest priority
+                    if (gpuTex != null) {
+                        for (Field f : gpuTex.getClass().getDeclaredFields()) {
+                            if (f.getType() == int.class) {
+                                f.setAccessible(true);
+                                int id = f.getInt(gpuTex);
+                                if (id > 0) {
+                                    entityGlTexIds.put(type, id);
+                                    bindTextureUnit0(id);
+                                    return id;
+                                }
                             }
-                            candidates.add(part);
                         }
                     }
                 }
-                current = current.getSuperclass();
             }
-        } catch (Exception ignored) {}
 
-        // If multiple candidates, pick the one that has the most children in its map
-        ModelPart best = null;
-        int maxChildren = -1;
-        for (ModelPart p : candidates) {
-            int c = countChildren(p);
-            if (c > maxChildren) {
-                maxChildren = c;
-                best = p;
+            int fallbackId = glGetInteger(GL_TEXTURE_BINDING_2D);
+            if (fallbackId > 0) {
+                entityGlTexIds.put(type, fallbackId);
+                bindTextureUnit0(fallbackId);
+                return fallbackId;
             }
+        } catch (Exception e) {
+            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("bindEntityTexture failed: {}", e.getMessage());
         }
-
-        return best;
-    }
-
-    private int countChildren(ModelPart part) {
-        try {
-            for (String name : new String[]{"field_3661", "children", "n"}) {
-                Field f = getCachedField(ModelPart.class, name);
-                if (f != null && Map.class.isAssignableFrom(f.getType())) {
-                    Map<?, ?> map = (Map<?, ?>) f.get(part);
-                    return map != null ? map.size() : 0;
-                }
-            }
-        } catch (Exception ignored) {}
         return 0;
     }
 
-    private void resetPose(ModelPart part) {
-        try {
-            // Try known method names for resetPose
-            // In 1.21.11, resetPose is method_41923 (Yarn) or 'c' (Mojang)
-            for (String name : new String[]{"resetPose", "method_41923", "c"}) {
-                try {
-                    Method m = part.getClass().getMethod(name);
-                    m.invoke(part);
-                    return;
-                } catch (NoSuchMethodException ignored) {}
-            }
-            
-            // Manually zero rotations if method not found
-            part.xRot = 0; part.yRot = 0; part.zRot = 0;
-            // Search for children field by name/type
-            Field childrenField = null;
-            for (String name : new String[]{"children", "field_3661", "d"}) {
-                childrenField = getCachedField(ModelPart.class, name);
-                if (childrenField != null && Map.class.isAssignableFrom(childrenField.getType())) break;
-            }
-            
-            if (childrenField != null) {
-                @SuppressWarnings("unchecked")
-                Map<String, ModelPart> children = (Map<String, ModelPart>) childrenField.get(part);
-                if (children != null) children.values().forEach(this::resetPose);
-            }
-        } catch (Exception ignored) {}
+    private void bindTextureUnit0(int glId) {
+        if (glId <= 0 || glId == lastBoundGlTexId) return;
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, glId);
+        glUniform1i(uEntityTextures, 0);
+        lastBoundGlTexId = glId;
     }
 
-    private static final Map<String, Field> FIELD_CACHE = new HashMap<>();
+    public void writeEntityInstance(long ptr, Object state, double rx, double ry, double rz) {
+        if (state == null) return;
+        StateAccessor acc = ACCESSOR_CACHE.get(state.getClass());
+        try {
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_POSITION_X, (float) rx);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_POSITION_Y, (float) ry);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_POSITION_Z, (float) rz);
 
-    private static Field getCachedField(Class<?> startClass, String name) {
-        String key = startClass.getName() + "#" + name;
-        if (FIELD_CACHE.containsKey(key)) return FIELD_CACHE.get(key);
-        
-        Class<?> cls = startClass;
-        while (cls != null) {
+            float yawDeg = acc.yaw != null ? (float) acc.yaw.invoke(state) : 0f;
+            float rotY = (float)(Math.toRadians(yawDeg) - Math.PI);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ROTATION_Y, rotY);
+
+            EntityType<?> type = acc.type != null ? (EntityType<?>) acc.type.invoke(state) : null;
+            boolean isArmorStand = (type == EntityType.ARMOR_STAND);
+
+            float limbSwing    = 0f;
+            float limbSwingAmt = 0f;
+            float headYawRel   = 0f;
+            float headPitchRel = 0f;
+            float attackProgress = 0f;
+            float swimProgress   = 0f;
+            float sneakProg      = 0f;
+            float deathTime      = 0f;
+            float hurtTime       = 0f;
+
+            if (!isArmorStand) {
+                if (acc.limbSwing != null) limbSwing = (float) acc.limbSwing.invoke(state);
+                if (acc.limbSwingAmt != null) {
+                    float raw = (float) acc.limbSwingAmt.invoke(state);
+                    limbSwingAmt = raw < 0f ? 0f : raw > 1f ? 1f : raw;
+                }
+                if (acc.headYaw != null) {
+                    float absHeadYaw = (float) acc.headYaw.invoke(state);
+                    float relDeg = absHeadYaw - yawDeg;
+                    while (relDeg >  180f) relDeg -= 360f;
+                    while (relDeg < -180f) relDeg += 360f;
+                    headYawRel = (float) Math.toRadians(relDeg);
+                }
+                if (acc.headPitch != null)
+                    headPitchRel = (float) Math.toRadians((float) acc.headPitch.invoke(state));
+                if (acc.attackProgress != null) attackProgress = (float) acc.attackProgress.invoke(state);
+                if (acc.swimProgress   != null) swimProgress   = (float) acc.swimProgress.invoke(state);
+                if (acc.sneaking       != null && (boolean) acc.sneaking.invoke(state)) sneakProg = 1f;
+                if (acc.hurtTime       != null && (boolean) acc.hurtTime.invoke(state))  hurtTime  = 10f;
+                if (acc.deathTime      != null) {
+                    float raw = (float) acc.deathTime.invoke(state);
+                    if (raw >= 0f && raw <= 20f) deathTime = raw;
+                }
+            }
+
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_LIMB_SWING,      limbSwing);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_LIMB_SWING_AMT,  limbSwingAmt);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_HEAD_YAW,        headYawRel);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_HEAD_PITCH,      headPitchRel);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ATTACK_PROGRESS, attackProgress);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_BOW_PULL,        0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_HURT_TIME,       hurtTime);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_DEATH_TIME,      deathTime);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SNEAK_PROGRESS,  sneakProg);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SWIM_PROGRESS,   swimProgress);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_RIPTIDE,         0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SIT_PROGRESS,    0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_EAT_PROGRESS,    0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SWELL_AMOUNT,    0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_EXPLODE_PROGRESS,0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ROLL_PROGRESS,   0f);
+
+            int flags = 0;
+            if (acc.invisible != null && (boolean) acc.invisible.invoke(state)) flags |= EntityInstance.FLAG_IS_INVISIBLE;
+            if (acc.onGround  != null && (boolean) acc.onGround.invoke(state))  flags |= EntityInstance.FLAG_ON_GROUND;
+            if (acc.inWater   != null && (boolean) acc.inWater.invoke(state))   flags |= EntityInstance.FLAG_IS_IN_WATER;
+            if (type == EntityType.PLAYER) flags |= EntityInstance.FLAG_IS_PLAYER;
+            if (type != null && EntityBatchRegistry.hasZombieArms(type)) flags |= EntityInstance.FLAG_ZOMBIE_ARMS;
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_FLAGS, flags);
+
+            int typeIdx  = type != null ? EntityBatchRegistry.getEntityTypeIndex(type) : 0;
+            EntityAnimationCategory cat = type != null ? EntityBatchRegistry.getCategory(type) : EntityAnimationCategory.CPU_ANIMATED;
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ENTITY_TYPE,   typeIdx);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ANIM_CATEGORY, cat.glslId);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_TEXTURE_LAYER, 0);
+
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_HELD_MAIN,       EntityInstance.NO_ITEM);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_HELD_OFFHAND,    EntityInstance.NO_ITEM);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_HEAD,      EntityInstance.NO_ARMOR);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_CHEST,     EntityInstance.NO_ARMOR);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_LEGS,      EntityInstance.NO_ARMOR);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_FEET,      EntityInstance.NO_ARMOR);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_MOUNT_ID,        EntityInstance.NO_MOUNT);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SEAT_OFFSET_X, 0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SEAT_OFFSET_Y, 0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SEAT_OFFSET_Z, 0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_TEX_SCALE_X,   1f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_TEX_SCALE_Y,   1f);
+
+        } catch (Throwable e) {
+            MemoryUtil.memSet(ptr, 0, EntityInstance.STRIDE);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static EntityType<?> getEntityType(Object state) {
+        if (state == null) return null;
+        StateAccessor acc = ACCESSOR_CACHE.get(state.getClass());
+        if (acc.type != null) {
             try {
-                Field f = cls.getDeclaredField(name);
-                f.setAccessible(true);
-                FIELD_CACHE.put(key, f);
-                return f;
-            } catch (NoSuchFieldException e) { 
-                cls = cls.getSuperclass(); 
-            }
+                return (EntityType<?>) acc.type.invoke(state);
+            } catch (Throwable ignored) {}
         }
-        
-        // Final fallback: search for field by type if name search failed
-        // For example, if "field_3661" (Map) or "field_3663" (List) changes
-        if (name.equals("field_3661")) { // Map<String, ModelPart>
-            for (Field f : startClass.getDeclaredFields()) {
-                if (Map.class.isAssignableFrom(f.getType())) {
-                    f.setAccessible(true);
-                    FIELD_CACHE.put(key, f);
-                    if (Rentities.IS_DEBUG) Rentities.LOGGER.info("Fell back to Map field {} for field_3661", f.getName());
-                    return f;
-                }
-            }
-        } else if (name.equals("field_3663")) { // List<Cube>
-            for (Field f : startClass.getDeclaredFields()) {
-                if (List.class.isAssignableFrom(f.getType())) {
-                    f.setAccessible(true);
-                    FIELD_CACHE.put(key, f);
-                    if (Rentities.IS_DEBUG) Rentities.LOGGER.info("Fell back to List field {} for field_3663", f.getName());
-                    return f;
-                }
-            }
-        }
-
-        FIELD_CACHE.put(key, null);
         return null;
     }
 
-    private static List<Field> getAllFields(Class<?> cls) {
-        List<Field> fields = new ArrayList<>();
-        Class<?> c = cls;
-        while (c != null && c != Object.class) {
-            fields.addAll(Arrays.asList(c.getDeclaredFields()));
-            c = c.getSuperclass();
-        }
-        return fields;
-    }
-
-    private static Map<String, Integer> getBoneMap(EntityAnimationCategory category) {
-        return switch (category) {
-            case BIPED, FLOATING, FLOATING_SPINNING, SHULKER, STRIDER -> BIPED_BONES;
-            case QUADRUPED, GOAT, SNIFFER, ARMADILLO, AQUATIC_LEGS, SWIMMING, FROG -> QUADRUPED_BONES;
-            case HORSE -> HORSE_BONES;
-            case BIRD -> BIRD_BONES;
-            case ARTHROPOD -> ARTHROPOD_BONES;
-            case INSECT -> INSECT_BONES;
-            case WORM -> WORM_BONES;
-            case FISH -> FISH_BONES;
-            case SLIME -> SLIME_BONES;
-            case GHAST -> GHAST_BONES;
-            case CREEPER -> CREEPER_BONES;
-            default -> BIPED_BONES;
-        };
-    }
-
-
-    private float[] generatePlaceholderMesh(EntityAnimationCategory category) {
-        List<float[]> bones = new ArrayList<>();
-        // In 1.21.11, we capture meshes in PIXEL units (16 units = 1 block).
-        // The shader then scales by 0.0625.
-        // So placeholders must also be in pixels.
-        switch (category) {
-            case BIPED, CREEPER -> {
-                bones.add(box(-4, 24, -4, 8, 8, 8, 0));   // HEAD
-                bones.add(box(-4, 12, -2, 8, 12, 4, 1));  // BODY
-                bones.add(box(-8, 12, -2, 4, 12, 4, 2));  // ARM_L
-                bones.add(box( 4, 12, -2, 4, 12, 4, 3));  // ARM_R
-                bones.add(box(-4,  0, -2, 4, 12, 4, 4));  // LEG_L
-                bones.add(box( 0,  0, -2, 4, 12, 4, 5));  // LEG_R
-            }
-            case QUADRUPED, GOAT, SNIFFER, ARMADILLO -> {
-                bones.add(box(-4, 16, -8, 8, 8, 8, 0));    // HEAD
-                bones.add(box(-5, 10, -6, 10, 8, 16, 1));  // BODY
-                bones.add(box(-7,  0, -2, 4, 10, 4, 2));   // LEG_FL
-                bones.add(box( 3,  0, -2, 4, 10, 4, 3));   // LEG_FR
-                bones.add(box(-7,  0,  8, 4, 10, 4, 4));   // LEG_BL
-                bones.add(box( 3,  0,  8, 4, 10, 4, 5));   // LEG_BR
-            }
-            case HORSE -> {
-                bones.add(box(-3, 16, -7, 6, 8, 6, 0));   // HEAD
-                bones.add(box(-5, 10, -6, 10, 8, 16, 1)); // BODY
-                bones.add(box(-6,  0, -2, 4, 10, 4, 2));
-                bones.add(box( 2,  0, -2, 4, 10, 4, 3));
-                bones.add(box(-6,  0,  8, 4, 10, 4, 4));
-                bones.add(box( 2,  0,  8, 4, 10, 4, 5));
-                bones.add(box(-1,  6, 10, 2, 8, 2, 6));   // TAIL
-            }
-            case BIRD -> {
-                bones.add(box(-2, 14,  -4, 4, 4, 4, 0));  // HEAD
-                bones.add(box(-3,  9,  -3, 6, 6, 8, 1));  // BODY
-                bones.add(box(-6,  9,  -3, 3, 2, 6, 2));  // WING_L
-                bones.add(box( 3,  9,  -3, 3, 2, 6, 3));  // WING_R
-                bones.add(box(-2,  0,  -1, 2, 9, 2, 4));  // LEG_L
-                bones.add(box( 0,  0,  -1, 2, 9, 2, 5));  // LEG_R
-            }
-            case SLIME -> {
-                bones.add(box(-3, 1, -3, 6, 6, 6, 0));   // BODY
-                bones.add(box(-2, 2, -4, 4, 4, 4, 0));   // INNER
-            }
-            default -> bones.add(box(-4, 0, -4, 8, 16, 8, 0));
-        }
-        int total = bones.stream().mapToInt(b -> b.length).sum();
-        float[] result = new float[total];
-        int pos = 0;
-        for (float[] b : bones) { System.arraycopy(b, 0, result, pos, b.length); pos += b.length; }
-        return result;
-    }
-
-    /** Box mesh: 24 vertices (4 per face × 6 faces), 9 floats each. */
-    private float[] box(float x, float y, float z, float w, float h, float d, int bone) {
-        float x2 = x+w, y2 = y+h, z2 = z+d, bf = (float)bone;
-        // Vertices: pos(3), normal(3), uv(2), bone(1) = 9 floats
-        return new float[]{
-            // Top (Y+) - Normal (0,1,0)
-            x,y2,z,  0,1,0, 0,0,bf,  
-            x,y2,z2,  0,1,0, 0,1,bf,  
-            x2,y2,z2, 0,1,0, 1,1,bf,  
-            x2,y2,z, 0,1,0, 1,0,bf,
-            
-            // Bottom (Y-) - Normal (0,-1,0)
-            x,y,z,  0,-1,0, 0,0,bf,  
-            x2,y,z,  0,-1,0, 1,0,bf,  
-            x2,y,z2, 0,-1,0, 1,1,bf,  
-            x,y,z2, 0,-1,0, 0,1,bf,
-            
-            // Right (X+) - Normal (1,0,0)
-            x2,y,z,  1,0,0, 0,0,bf,  
-            x2,y2,z, 1,0,0, 0,1,bf,  
-            x2,y2,z2, 1,0,0, 1,1,bf,  
-            x2,y,z2, 1,0,0, 1,0,bf,
-            
-            // Left (X-) - Normal (-1,0,0)
-            x,y,z,  -1,0,0, 0,0,bf,  
-            x,y,z2,  -1,0,0, 1,0,bf,  
-            x,y2,z2, -1,0,0, 1,1,bf,  
-            x,y2,z, -1,0,0, 0,1,bf,
-            
-            // Front (Z+) - Normal (0,0,1)
-            x,y,z2,  0,0,1, 0,0,bf,  
-            x2,y,z2, 0,0,1, 1,0,bf,  
-            x2,y2,z2, 0,0,1, 1,1,bf,  
-            x,y2,z2, 0,0,1, 0,1,bf,
-            
-            // Back (Z-) - Normal (0,0,-1)
-            x,y,z,   0,0,-1,0,0,bf,  
-            x,y2,z,  0,0,-1,0,1,bf,  
-            x2,y2,z, 0,0,-1, 1,1,bf,  
-            x2,y,z,  0,0,-1,1,0,bf,
-        };
-    }
-
-
-    private void uploadToGPU(List<float[]> allVertices, List<int[]> allIndices,
-                              int totalVertices, int totalIndices) {
-        vaoId = glCreateVertexArrays();
-        vboId = glCreateBuffers();
-        eboId = glCreateBuffers();
-
-        long vboSize = (long) totalVertices * VERTEX_STRIDE;
-        long eboSize = (long) totalIndices * 4;
-        glNamedBufferData(vboId, vboSize, GL_STATIC_DRAW);
-        glNamedBufferData(eboId, eboSize, GL_STATIC_DRAW);
-
-        long vboOff = 0, eboOff = 0;
-        for (int i = 0; i < allVertices.size(); i++) {
-            float[] verts = allVertices.get(i);
-            int[] inds = allIndices.get(i);
-
-            ByteBuffer vbuf = MemoryUtil.memAlloc(verts.length * 4);
-            vbuf.asFloatBuffer().put(verts);
-            glNamedBufferSubData(vboId, vboOff, vbuf);
-            MemoryUtil.memFree(vbuf);
-
-            ByteBuffer ibuf = MemoryUtil.memAlloc(inds.length * 4);
-            // Verify indices are within total vertex range
-            for (int idx : inds) {
-                if (idx >= totalVertices) {
-                    if (Rentities.IS_DEBUG) Rentities.LOGGER.error("INDEX OUT OF BOUNDS: {} >= {}", idx, totalVertices);
-                }
-            }
-            ibuf.asIntBuffer().put(inds);
-            glNamedBufferSubData(eboId, eboOff, ibuf);
-            MemoryUtil.memFree(ibuf);
-
-            vboOff += (long) verts.length * 4;
-            eboOff += (long) inds.length * 4;
-        }
-
-        // VAO attrib layout
-        glVertexArrayVertexBuffer(vaoId, 0, vboId, 0, VERTEX_STRIDE);
-        // Attrib 0: position (vec3, offset 0)
-        glEnableVertexArrayAttrib(vaoId, 0);
-        glVertexArrayAttribFormat(vaoId, 0, 3, GL_FLOAT, false, 0);
-        glVertexArrayAttribBinding(vaoId, 0, 0);
-        // Attrib 1: normal (vec3, offset 12)
-        glEnableVertexArrayAttrib(vaoId, 1);
-        glVertexArrayAttribFormat(vaoId, 1, 3, GL_FLOAT, false, 12);
-        glVertexArrayAttribBinding(vaoId, 1, 0);
-        // Attrib 2: texcoord (vec2, offset 24)
-        glEnableVertexArrayAttrib(vaoId, 2);
-        glVertexArrayAttribFormat(vaoId, 2, 2, GL_FLOAT, false, 24);
-        glVertexArrayAttribBinding(vaoId, 2, 0);
-        // Attrib 3: boneIndex (float, offset 32)
-        glEnableVertexArrayAttrib(vaoId, 3);
-        glVertexArrayAttribFormat(vaoId, 3, 1, GL_FLOAT, false, 32);
-        glVertexArrayAttribBinding(vaoId, 3, 0);
-
-        glVertexArrayElementBuffer(vaoId, eboId);
-        
-        // Final sanity check: force VAO binding to ensure state is captured
-        glBindVertexArray(vaoId);
-        glBindVertexArray(0);
-    }
-
-    private int[] generateIndices(int vertexCount, int baseVertex) {
-        int quadCount = vertexCount / 4;
-        int[] idx = new int[quadCount * 6];
-        for (int i = 0; i < quadCount; i++) {
-            int b = baseVertex + i*4, o = i*6;
-            idx[o]=b; idx[o+1]=b+1; idx[o+2]=b+2;
-            idx[o+3]=b; idx[o+4]=b+2; idx[o+5]=b+3;
-        }
-        return idx;
-    }
-
-    public int getVaoId() { return vaoId; }
-    public Map<EntityType<?>, MeshInfo> getMeshInfoMap() { return meshInfoMap; }
-    public boolean isBaked() { return baked; }
-
-
-    /**
-     * Uploads the bone pivot table to a static SSBO (binding 13).
-     * Must be called AFTER bake() completes.
-     * Returns the GL buffer id.
-     */
-    public int uploadPivotSSBO() {
-        if (pivotSSBOId != 0) return pivotSSBOId; // already uploaded
-        pivotSSBOId = glCreateBuffers();
-        ByteBuffer buf = MemoryUtil.memAlloc(bonePivotData.length * 4);
-        buf.asFloatBuffer().put(bonePivotData).flip();
-        glNamedBufferData(pivotSSBOId, buf, GL_STATIC_DRAW);
-        MemoryUtil.memFree(buf);
-        if (Rentities.IS_DEBUG) Rentities.LOGGER.info("Uploaded bone pivot SSBO: {} entries", bonePivotData.length / 4);
-        return pivotSSBOId;
-    }
-
-    public int getPivotSSBOId() { return pivotSSBOId; }
-
-    // Cache format (little-endian binary):
-    //   [int magic=0xECAC1021] [int version=1]
-    //   [int entityTypeCount]
-    //   per type:
-    //     [int idLen] [byte[] id utf8]
-    //     [int vertexFloatCount] [float[] vertices]
-    //     [int indexCount]       [int[]   indices]
-    //     [int boneIdx0..7 pivotX,Y,Z,0 = 32 floats]  (bone pivot table for this type)
-    //     [int meshVertexOffset] [int meshIndexOffset] [int meshIndexCount]
-    //   [int pivotTableSize] [float[] full bonePivotData] (all types × MAX_BONES × 4)
-
-    private static final int CACHE_MAGIC   = 0xECAC1021;
-    private static final int CACHE_VERSION = 1;
-
-    /** Cache file location: .minecraft/rentities_entity_mesh_cache.bin */
-    private static java.io.File cacheFile = null;
-
-    private static java.io.File getCacheFile() {
-        if (cacheFile == null) {
-            cacheFile = new java.io.File(
-                net.minecraft.client.Minecraft.getInstance().gameDirectory,
-                "rentities_entity_mesh_cache.bin");
-        }
-        return cacheFile;
-    }
-
-    /**
-     * Serialises the baked mesh data to disk.
-     * Call after bake() succeeds.
-     */
-    public void saveToCache(List<float[]> allVertices, List<int[]> allIndices) {
-        java.io.File f = getCacheFile();
-        List<EntityType<?>> types = new ArrayList<>(meshInfoMap.keySet());
-
-        try (java.io.DataOutputStream out = new java.io.DataOutputStream(
-                new java.io.BufferedOutputStream(new java.io.FileOutputStream(f)))) {
-            out.writeInt(CACHE_MAGIC);
-            out.writeInt(CACHE_VERSION);
-            out.writeInt(types.size());
-
-            int i = 0;
-            for (EntityType<?> type : types) {
-                MeshInfo info = meshInfoMap.get(type);
-                float[] verts = allVertices.get(i);
-                int[]   inds  = allIndices.get(i);
-                i++;
-
-                // Type ID
-                String id = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE
-                        .getKey(type).toString();
-                byte[] idBytes = id.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                out.writeInt(idBytes.length);
-                out.write(idBytes);
-
-                // Vertices
-                out.writeInt(verts.length);
-                for (float v : verts) out.writeFloat(v);
-
-                // Indices
-                out.writeInt(inds.length);
-                for (int idx : inds) out.writeInt(idx);
-
-                // Mesh info
-                out.writeInt(info.vertexOffset);
-                out.writeInt(info.indexOffset);
-                out.writeInt(info.indexCount);
-            }
-
-            // Full bone pivot table
-            out.writeInt(bonePivotData.length);
-            for (float p : bonePivotData) out.writeFloat(p);
-
-            Rentities.LOGGER.info("[EntityCache] Saved {} entity types to {}", types.size(), f.getPath());
+    private void compileShader() {
+        try {
+            String vertSrc = loadShader("assets/rentities/shaders/entity/entity_vert.glsl");
+            String fragSrc = loadShader("assets/rentities/shaders/entity/entity_frag.glsl");
+            entityShader = GlShader.builder()
+                    .vert(vertSrc)
+                    .frag(fragSrc)
+                    .compile();
+            entityShader.bind();
+            uViewProjection = entityShader.getUniformLocation("uViewProjection");
+            uGameTime       = entityShader.getUniformLocation("uGameTime");
+            uEntityTextures = entityShader.getUniformLocation("uEntityTexture");
+            uBaseInstance   = entityShader.getUniformLocation("uBaseInstance");
+            uIndirect       = entityShader.getUniformLocation("uIndirect");
+            glUseProgram(0);
         } catch (Exception e) {
-            Rentities.LOGGER.error("[EntityCache] Failed to save cache: {}", e.getMessage());
+            Rentities.LOGGER.error("Entity shader compilation failed", e);
+            entityShader = null;
         }
     }
 
-    /**
-     * Loads previously saved mesh data directly to GPU without running the
-     * full vanilla model extraction pipeline.
-     * Returns true if cache was loaded successfully.
-     */
-    public boolean loadFromCache() {
-        java.io.File f = getCacheFile();
-        if (!f.exists()) return false;
-
-        try (java.io.DataInputStream in = new java.io.DataInputStream(
-                new java.io.BufferedInputStream(new java.io.FileInputStream(f)))) {
-
-            if (in.readInt() != CACHE_MAGIC)   { Rentities.LOGGER.warn("[EntityCache] Bad magic"); return false; }
-            if (in.readInt() != CACHE_VERSION)  { Rentities.LOGGER.warn("[EntityCache] Version mismatch"); return false; }
-
-            int typeCount = in.readInt();
-            List<float[]> allVertices = new ArrayList<>(typeCount);
-            List<int[]>   allIndices  = new ArrayList<>(typeCount);
-            int totalVertexCount = 0, totalIndexCount = 0;
-
-            for (int i = 0; i < typeCount; i++) {
-                // Type ID
-                int idLen = in.readInt();
-                byte[] idBytes = new byte[idLen];
-                in.readFully(idBytes);
-                String id = new String(idBytes, java.nio.charset.StandardCharsets.UTF_8);
-                // Find entity type by matching the saved ID string against all known types.
-                // Avoids ResourceLocation/reflection issues — same iteration used in bake().
-                EntityType<?> type = null;
-                for (EntityType<?> candidate : EntityBatchRegistry.REGISTRY_TYPES()) {
-                    Object key = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(candidate);
-                    if (key != null && key.toString().equals(id)) {
-                        type = candidate;
-                        break;
-                    }
-                }
-                if (type == null) {
-                    Rentities.LOGGER.warn("[EntityCache] Unknown entity type: {}, skipping", id);
-                    // Still need to read past the data
-                    int vLen = in.readInt(); for (int j=0;j<vLen;j++) in.readFloat();
-                    int iLen = in.readInt(); for (int j=0;j<iLen;j++) in.readInt();
-                    in.readInt(); in.readInt(); in.readInt(); // meshInfo
-                    continue;
-                }
-
-                // Vertices
-                int vLen = in.readInt();
-                float[] verts = new float[vLen];
-                for (int j = 0; j < vLen; j++) verts[j] = in.readFloat();
-
-                // Indices
-                int iLen = in.readInt();
-                int[] inds = new int[iLen];
-                for (int j = 0; j < iLen; j++) inds[j] = in.readInt();
-
-                // Mesh info
-                int vOffset = in.readInt();
-                int iOffset = in.readInt();
-                int iCount  = in.readInt();
-                meshInfoMap.put(type, new MeshInfo(vOffset, iOffset, iCount));
-
-                allVertices.add(verts);
-                allIndices.add(inds);
-                totalVertexCount += verts.length / 9;
-                totalIndexCount  += iLen;
-            }
-
-            // Pivot table
-            int pivotLen = in.readInt();
-            for (int i = 0; i < Math.min(pivotLen, bonePivotData.length); i++)
-                bonePivotData[i] = in.readFloat();
-
-            // Upload to GPU
-            uploadToGPU(allVertices, allIndices, totalVertexCount, totalIndexCount);
-            baked = true;
-            Rentities.LOGGER.info("[EntityCache] Loaded {} entity types from cache", meshInfoMap.size());
-            return true;
-
+    private String loadShader(String path) {
+        try {
+            var stream = getClass().getClassLoader().getResourceAsStream(path);
+            if (stream == null) throw new RuntimeException("Shader not found: " + path);
+            return new String(stream.readAllBytes());
         } catch (Exception e) {
-            Rentities.LOGGER.error("[EntityCache] Failed to load cache: {}", e.getMessage());
-            meshInfoMap.clear();
-            baked = false;
-            return false;
+            throw new RuntimeException("Failed to load entity shader: " + path, e);
         }
     }
 
-    public static boolean cacheExists() { return getCacheFile().exists(); }
-    public static void deleteCache()    { getCacheFile().delete(); }
-    public static void deleteTextureCache() { EntityTextureAtlas.deleteTextureCache(); }
+    public boolean hasMeshFor(EntityType<?> type) {
+        return meshBaker.getMeshInfoMap().containsKey(type);
+    }
+
+    public void reloadShaders() {
+        if (entityShader != null) entityShader.delete();
+        compileShader();
+    }
 
     public void delete() {
-        if (vaoId != 0) glDeleteVertexArrays(vaoId);
-        if (vboId != 0) glDeleteBuffers(vboId);
-        if (eboId != 0) glDeleteBuffers(eboId);
+        if (entityShader != null) entityShader.delete();
+        fenceRing.deleteAll();
+        instanceRing.delete();
+        cullPipeline.delete();
+        if (extractionBuffer != 0) MemoryUtil.nmemFree(extractionBuffer);
+        meshBaker.delete();
+        errorRenderer.delete();
+        textureAtlas.delete();
+        skinCache.delete();
+        INSTANCE = null;
     }
 }

@@ -12,7 +12,7 @@ import java.lang.reflect.Method;
  * Resolves OpenGL texture names from Minecraft {@code ResourceLocation} keys.
  * Method and field lookups are cached once; per-location GL ids are resolved once per session.
  */
-final class EntityGlTextureResolver {
+public final class EntityGlTextureResolver {
 
     private static Object textureManager = null;
     private static Method bindTexMethod = null;
@@ -22,7 +22,7 @@ final class EntityGlTextureResolver {
 
     private EntityGlTextureResolver() {}
 
-    static int resolveGlId(Object loc) {
+    public static int resolveGlId(Object loc) {
         if (loc == null) return 0;
         ensureMethods(loc);
         if (textureManager == null || bindTexMethod == null || getTexMethod == null) return 0;

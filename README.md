@@ -32,7 +32,7 @@ Rentities and Lithium are complementary — Lithium reduces CPU server tick cost
 
 - NVIDIA GPU (GTX 10 series or newer)
 - Fabric Loader 0.17.2+
-- Sodium 0.8.6
+- Sodium 0.8.13
 - Minecraft 1.21.11
 
 Works standalone. Does not require Nvidium, though both mods are compatible and stack together.

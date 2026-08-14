@@ -12,29 +12,28 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Step 2: Set up Java Development Kit (JDK 25 required for Minecraft)
+      # Step 2: Set up Java Development Kit
       - name: Set up JDK 25
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '25'
 
-      # Step 3: Setup Gradle & Caching
+      # Step 3: Setup Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           cache-read-only: false
 
-      # Step 4: Grant execute permission for Gradle wrapper
+      # Step 4: Force-regenerate clean Gradle wrapper binary
+      - name: Regenerate Gradle Wrapper
+        run: gradle wrapper --gradle-version 8.11.1
+
+      # Step 5: Grant execute permission for Gradle wrapper
       - name: Make gradlew Executable
         run: chmod +x ./gradlew
 
-      # Step 5: Replace corrupt gradle-wrapper.jar with a clean working copy
-      - name: Fix Corrupt Gradle Wrapper JAR
-        run: |
-          wget -O gradle/wrapper/gradle-wrapper.jar https://github.com/gradle/gradle/raw/v8.11.1/gradle/wrapper/gradle-wrapper.jar
-
-      # Step 6: Build project and run tests
+      # Step 6: Build project
       - name: Build with Gradle
         run: ./gradlew build --no-daemon
 

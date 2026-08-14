@@ -11,7 +11,6 @@ import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryUtil;
 
 import java.lang.reflect.Field;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -20,33 +19,16 @@ import static org.lwjgl.opengl.GL11C.*;
 import static org.lwjgl.opengl.GL13C.GL_ACTIVE_TEXTURE;
 import static org.lwjgl.opengl.GL13C.GL_TEXTURE0;
 import static org.lwjgl.opengl.GL13C.glActiveTexture;
-import static org.lwjgl.opengl.GL15C.glDeleteBuffers;
 import static org.lwjgl.opengl.GL20C.glGetUniformLocation;
 import static org.lwjgl.opengl.GL20C.glUniform1f;
 import static org.lwjgl.opengl.GL20C.glUniform1i;
 import static org.lwjgl.opengl.GL20C.glUniformMatrix4fv;
 import static org.lwjgl.opengl.GL20C.glUseProgram;
-import static org.lwjgl.opengl.GL30C.GL_MAP_WRITE_BIT;
-import static org.lwjgl.opengl.GL30C.GL_TEXTURE_2D_ARRAY;
 import static org.lwjgl.opengl.GL30C.glBindVertexArray;
-import static org.lwjgl.opengl.GL30C.GL_VERTEX_ARRAY_BINDING;
-import static org.lwjgl.opengl.GL20C.GL_CURRENT_PROGRAM;
 import static org.lwjgl.opengl.GL30C.glBindBufferRange;
-import static org.lwjgl.opengl.GL40C.glBindBufferBase;
 import static org.lwjgl.opengl.GL43C.glMultiDrawElementsIndirect;
-import static org.lwjgl.opengl.GL42C.GL_BUFFER_UPDATE_BARRIER_BIT;
-import static org.lwjgl.opengl.GL42C.glMemoryBarrier;
-import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BARRIER_BIT;
 import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER;
-import static org.lwjgl.opengl.GL44C.GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT;
-import static org.lwjgl.opengl.GL44C.GL_MAP_PERSISTENT_BIT;
-import static org.lwjgl.opengl.GL45C.glCreateBuffers;
-import static org.lwjgl.opengl.GL45C.glFlushMappedNamedBufferRange;
-import static org.lwjgl.opengl.GL45C.glNamedBufferStorage;
-import static org.lwjgl.opengl.GL45C.glUnmapNamedBuffer;
-import static org.lwjgl.opengl.GL45C.nglMapNamedBufferRange;
 import static org.lwjgl.opengl.GL31C.glDrawElementsInstanced;
-import static org.lwjgl.opengl.GL42C.glDrawElementsInstancedBaseInstance;
 
 public class EntityBatchRenderer {
 
@@ -62,10 +44,10 @@ public class EntityBatchRenderer {
     // Stored VP matrix from terrain render pass
     public static org.joml.Matrix4f storedViewProjection;
 
-    private static final int SSBO_BINDING       = 12;
-    private static final int PIVOT_SSBO_BINDING = 13;
-    private int pivotSSBOId = 0;
+    private static final int SSBO_BINDING = 12;
     private boolean textureCacheLoaded = false;
+    private boolean passPrepared = false;
+    private int lastBoundGlTexId = 0;
 
     /**
      * Three slots is the sweet spot for a persistently mapped ring: two lets the CPU run
@@ -80,7 +62,7 @@ public class EntityBatchRenderer {
     private final GpuFenceRing fenceRing = new GpuFenceRing(NUM_BUFFERS);
     private final EntityCullingPipeline cullPipeline;
     private final GlStateGuard stateGuard = new GlStateGuard(
-            SSBO_BINDING, PIVOT_SSBO_BINDING,
+            SSBO_BINDING,
             EntityCullingPipeline.GROUP_SSBO_BINDING,
             EntityCullingPipeline.CMD_SSBO_BINDING,
             EntityCullingPipeline.VISIBLE_SSBO_BINDING);
@@ -157,16 +139,30 @@ public class EntityBatchRenderer {
         }
     }
 
+    public static void beginWorldRender(Matrix4f positionMatrix, Matrix4f projectionMatrix) {
+        if (INSTANCE != null) INSTANCE.passPrepared = false;
+        setViewMatrix(positionMatrix);
+        updateProjectionMatrix(projectionMatrix);
+        prepareForEntityPass();
+    }
+
+    public static void ensurePrepared() {
+        if (INSTANCE != null && !INSTANCE.passPrepared) {
+            prepareForEntityPass();
+        }
+    }
+
+    public static void prepareForEntityPass() {
+        if (INSTANCE == null) return;
+        if (!INSTANCE.meshBaker.isBaked()) {
+            INSTANCE.meshBaker.bake();
+        }
+        INSTANCE.meshBaker.ensureTexturesBootstrapped();
+        INSTANCE.passPrepared = true;
+    }
+
     public static void flushBatch() {
         if (INSTANCE == null) return;
-        // Always trigger bake unconditionally — bake() is idempotent (noop after first run).
-        // Must happen here BEFORE doFlush() so it runs even when no entities are queued.
-        // This breaks the chicken-and-egg: bake needs to run to populate meshInfoMap,
-        // but meshInfoMap must exist before entities can be queued.
-        if (!INSTANCE.meshBaker.isBaked()) INSTANCE.meshBaker.bake();
-        // Upload pivot SSBO once immediately after bake completes
-        if (INSTANCE.pivotSSBOId == 0 && INSTANCE.meshBaker.isBaked())
-            INSTANCE.pivotSSBOId = INSTANCE.meshBaker.uploadPivotSSBO();
         INSTANCE.doFlush();
     }
 
@@ -233,8 +229,6 @@ public class EntityBatchRenderer {
             // offset, so advancing a frame does not re-validate the buffer at the binding point.
             glBindBufferRange(GL_SHADER_STORAGE_BUFFER, SSBO_BINDING, instanceRing.id(),
                     instanceRing.offsetOf(bufIdx), instanceRing.slotSize());
-            if (pivotSSBOId != 0)
-                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, PIVOT_SSBO_BINDING, pivotSSBOId);
 
             if (Rentities.config.entity_batching_debug && count > 0 && (System.currentTimeMillis() % 2000 < 50)) {
                  float px = MemoryUtil.memGetFloat(slotAddr + EntityInstance.OFFSET_POSITION_X);
@@ -277,6 +271,8 @@ public class EntityBatchRenderer {
 
                 glColorMask(true, true, true, true);
 
+                lastBoundGlTexId = 0;
+
                 boolean indirect = cullPipeline.isAvailable() && storedViewProjection != null;
                 if (indirect) {
                     indirect = renderIndirect(count, bufIdx);
@@ -290,9 +286,11 @@ public class EntityBatchRenderer {
                 // Fence AFTER the draws — signals when the GPU is done reading this slot
                 fenceRing.signal(bufIdx);
 
-                int err = glGetError();
-                if (err != 0) {
-                    Rentities.LOGGER.error("GL ERROR during entity draw: 0x{}", Integer.toHexString(err));
+                if (Rentities.IS_DEBUG) {
+                    int err = glGetError();
+                    if (err != 0) {
+                        Rentities.LOGGER.error("GL ERROR during entity draw: 0x{}", Integer.toHexString(err));
+                    }
                 }
             } else {
                 if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("FLUSH: meshBaker VAO is 0, skipping draw");
@@ -324,8 +322,9 @@ public class EntityBatchRenderer {
 
     private void sortByEntityType(int count) {
         for (int i = 0; i < count; i++) {
-            int typeId = System.identityHashCode(queuedTypes[i]);
-            sortKeys[i] = ((long) typeId << 32) | (queuedOriginalIndices[i] & 0xFFFFFFFFL);
+            EntityType<?> type = queuedTypes[i];
+            int typeIdx = type != null ? EntityBatchRegistry.getEntityTypeIndex(type) : 0;
+            sortKeys[i] = ((long) typeIdx << 32) | (queuedOriginalIndices[i] & 0xFFFFFFFFL);
         }
         java.util.Arrays.sort(sortKeys, 0, count);
         for (int i = 0; i < count; i++) {
@@ -454,13 +453,16 @@ public class EntityBatchRenderer {
         cameraZ = z;
     }
 
-    private static final org.joml.Matrix4f lastViewMatrix = new org.joml.Matrix4f();
+    private static final Matrix4f lastViewMatrix = new Matrix4f();
 
-    public static void updateProjectionMatrix(org.joml.Matrix4f projection) {
-        storedViewProjection = new org.joml.Matrix4f(projection).mul(lastViewMatrix);
+    public static void updateProjectionMatrix(Matrix4f projection) {
+        if (storedViewProjection == null) {
+            storedViewProjection = new Matrix4f();
+        }
+        projection.mul(lastViewMatrix, storedViewProjection);
     }
 
-    public static void setViewMatrix(org.joml.Matrix4f view) {
+    public static void setViewMatrix(Matrix4f view) {
         lastViewMatrix.set(view);
         // Zero out translation component (m30, m31, m32) because the shader
         // already uses camera-relative coordinates (inst.posX, etc.)
@@ -546,17 +548,44 @@ public class EntityBatchRenderer {
         @Override protected StateAccessor computeValue(Class<?> type) { return new StateAccessor(type); }
     };
 
-    // Entity types that need texture capture on the next flush
-    // Cache entity type -> AbstractTexture object (method_4619 result)
-    public final java.util.Map<net.minecraft.world.entity.EntityType<?>, Object> entityTextures
+    // Entity type -> texture ResourceLocation; GL ids cached separately in entityGlTexIds
+    public final java.util.Map<net.minecraft.world.entity.EntityType<?>, Object> entityTextureLocs
         = new java.util.concurrent.ConcurrentHashMap<>();
     public final java.util.Map<net.minecraft.world.entity.EntityType<?>, Integer> entityGlTexIds
         = new java.util.concurrent.ConcurrentHashMap<>();
-    // Types that permanently failed texture resolution — never retry to avoid per-frame reflection
     public final java.util.Set<net.minecraft.world.entity.EntityType<?>> entityTexFailed
         = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 
-    private void writeEntityInstance(long ptr, Object state, double rx, double ry, double rz) {
+    /** Binds the entity type's texture to unit 0 and returns the GL name, or 0 on failure. */
+    private int bindEntityTexture(EntityType<?> type) {
+        if (type == null) return 0;
+
+        Integer cached = entityGlTexIds.get(type);
+        if (cached != null && cached > 0) {
+            bindTextureUnit0(cached);
+            return cached;
+        }
+
+        Object loc = entityTextureLocs.get(type);
+        if (loc == null) return 0;
+
+        int glId = EntityGlTextureResolver.resolveGlId(loc);
+        if (glId > 0) {
+            entityGlTexIds.put(type, glId);
+            bindTextureUnit0(glId);
+        }
+        return glId;
+    }
+
+    private void bindTextureUnit0(int glId) {
+        if (glId <= 0 || glId == lastBoundGlTexId) return;
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, glId);
+        glUniform1i(uEntityTextures, 0);
+        lastBoundGlTexId = glId;
+    }
+
+    private void compileShader() {
         if (state == null) return;
         StateAccessor acc = ACCESSOR_CACHE.get(state.getClass());
         try {

@@ -185,6 +185,7 @@ public class EntityMeshBaker {
         // pipeline entirely and upload straight to GPU from the saved file.
         if (!Rentities.config.entity_scan_mode && loadFromCache()) {
             Rentities.LOGGER.info("[EntityCache] Using cached mesh data — skipping bake");
+            bootstrapTextures(Minecraft.getInstance().getEntityRenderDispatcher());
             return;
         }
 
@@ -211,14 +212,8 @@ public class EntityMeshBaker {
         var poseStack = new PoseStack();
 
         // Get the renderer map via reflection (field_4696 in 1.21.11 EntityRenderDispatcher)
-        Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer> rendererMap = null;
-        try {
-            Field f = net.minecraft.client.renderer.entity.EntityRenderDispatcher.class.getDeclaredField("field_4696");
-            f.setAccessible(true);
-            rendererMap = (Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer>) f.get(dispatcher);
-        } catch (Exception e) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.error("Failed to access renderer map: {}", e.getMessage());
-        }
+        Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer> rendererMap =
+                getRendererMap(dispatcher);
 
         for (EntityType<?> type : EntityBatchRegistry.REGISTRY_TYPES()) {
             EntityAnimationCategory category = EntityBatchRegistry.getCategory(type);
@@ -240,15 +235,6 @@ public class EntityMeshBaker {
                 if (renderer == null) {
                     if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("No renderer found in map for {}", type);
                 } else if (renderer instanceof LivingEntityRenderer livingRenderer) {
-                    try {
-                        net.minecraft.world.entity.Entity dummy = EntityFactory.getOrCreateDummy(type);
-                        if (dummy == null) {
-                            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("Could not create dummy for {}", type);
-                            continue;
-                        }
-                    } catch (Exception e) {
-                        if (Rentities.IS_DEBUG) Rentities.LOGGER.error("Failed to create dummy for {}: {}", type, e.getMessage());
-                    }
                     vertices = extractFromLivingRenderer(livingRenderer, category, consumer, poseStack);
                     if (Rentities.IS_DEBUG) {
                         if (vertices != null) {
@@ -294,6 +280,7 @@ public class EntityMeshBaker {
         }
 
         uploadToGPU(allVertices, allIndices, vertexCount, indexCount);
+        bootstrapTextures(dispatcher, rendererMap);
 
         // Always save after a fresh bake so next launch loads from cache.
         // Resolve file path NOW on render thread before handing to background thread.
@@ -310,6 +297,49 @@ public class EntityMeshBaker {
 
     /** Set to true after bake to request a texture cache save from EntityBatchRenderer. */
     public volatile boolean pendingTextureSave = false;
+
+    @SuppressWarnings("rawtypes")
+    public void ensureTexturesBootstrapped() {
+        if (texturesBootstrapped) return;
+        bootstrapTextures(Minecraft.getInstance().getEntityRenderDispatcher());
+        texturesBootstrapped = true;
+    }
+
+    @SuppressWarnings("rawtypes")
+    private static Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer> getRendererMap(
+            net.minecraft.client.renderer.entity.EntityRenderDispatcher dispatcher) {
+        if (cachedRendererMap != null) return cachedRendererMap;
+        if (dispatcher == null) return null;
+        try {
+            Field f = net.minecraft.client.renderer.entity.EntityRenderDispatcher.class.getDeclaredField("field_4696");
+            f.setAccessible(true);
+            cachedRendererMap = (Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer>) f.get(dispatcher);
+            return cachedRendererMap;
+        } catch (Exception e) {
+            if (Rentities.IS_DEBUG) Rentities.LOGGER.error("Failed to access renderer map: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    @SuppressWarnings("rawtypes")
+    private static volatile Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer> cachedRendererMap = null;
+
+    private boolean texturesBootstrapped = false;
+
+    @SuppressWarnings("rawtypes")
+    private static void bootstrapTextures(net.minecraft.client.renderer.entity.EntityRenderDispatcher dispatcher) {
+        bootstrapTextures(dispatcher, getRendererMap(dispatcher));
+    }
+
+    @SuppressWarnings("rawtypes")
+    private static void bootstrapTextures(
+            net.minecraft.client.renderer.entity.EntityRenderDispatcher dispatcher,
+            Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer> rendererMap) {
+        if (dispatcher == null || rendererMap == null) return;
+        EntityBatchRenderer renderer = EntityBatchRenderer.INSTANCE;
+        if (renderer == null) return;
+        EntityTextureBootstrap.bootstrap(renderer, rendererMap);
+    }
 
     /**
      * Extracts geometry from a LivingEntityRenderer by walking its model's

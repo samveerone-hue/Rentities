@@ -54,25 +54,14 @@ public class MixinLevelRenderer {
         EntityBatchRenderer.cameraY = camPos.y;
         EntityBatchRenderer.cameraZ = camPos.z;
 
-        EntityBatchRenderer.setViewMatrix(new Matrix4f(positionMatrix));
-        EntityBatchRenderer.updateProjectionMatrix(new Matrix4f(projectionMatrix));
+        EntityBatchRenderer.beginWorldRender(positionMatrix, projectionMatrix);
     }
 
-    /**
-     * {@code LevelRenderer.extractEntity} is the allocation site for the vanilla render state:
-     * it delegates to {@code EntityRenderDispatcher.extractEntity}, which creates the state
-     * object and populates it from the model, texture, equipment and name tag. Batched
-     * entities never need any of that, so the extraction is replaced wholesale here rather
-     * than cancelled after the fact at submit time.
-     *
-     * <p>The caller adds the returned state to a list and dereferences it, so a shared
-     * sentinel is returned instead of null; the dispatcher mixin recognises it and cancels
-     * the submit without touching it.
-     */
     @Inject(method = "method_72914", at = @At("HEAD"), cancellable = true, remap = false)
     private void extractEntityDirect(Entity entity, float partialTick,
                                      CallbackInfoReturnable<EntityRenderState> cir) {
         if (!Rentities.IS_ENABLED) return;
+        EntityBatchRenderer.ensurePrepared();
         if (EntityDirectExtractor.tryExtract(entity, partialTick)) {
             cir.setReturnValue(EntityDirectExtractor.SENTINEL);
         }

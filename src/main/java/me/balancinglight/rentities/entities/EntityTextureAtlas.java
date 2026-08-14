@@ -71,7 +71,7 @@ public class EntityTextureAtlas {
             // Find getTexture method
             Method getTextureMethod = null;
             for (Method m : textureManager.getClass().getMethods()) {
-                if ((m.getName().equals("method_4615") || m.getName().equals("getTexture")) &&
+                if ((m.getName().equals("method_4619") || m.getName().equals("getTexture")) &&
                     m.getParameterCount() == 1 && m.getParameterTypes()[0].isAssignableFrom(identifier.getClass())) {
                     getTextureMethod = m;
                     break;

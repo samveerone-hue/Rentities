@@ -47,10 +47,6 @@ public final class EntityDirectExtractor {
         EntityType<?> type = entity.getType();
         if (EntityBatchRegistry.getCategory(type) == EntityAnimationCategory.CPU_ANIMATED) return false;
         if (!renderer.hasMeshFor(type)) return false;
-
-        // The texture is resolved from a render state the first time an entity of this type is
-        // seen, so until that has happened the type keeps taking the vanilla path. This costs
-        // one extraction per type per session, not per entity per frame.
         if (!renderer.entityTextureLocs.containsKey(type)) return false;
 
         long ptr = EntityBatchRenderer.reserveInstance(type);

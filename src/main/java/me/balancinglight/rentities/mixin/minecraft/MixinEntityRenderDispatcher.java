@@ -51,7 +51,7 @@ public abstract class MixinEntityRenderDispatcher {
             return;
         }
 
-        if (renderer != null && !renderer.entityGlTexIds.containsKey(type)
+        if (renderer != null && !renderer.entityTextureLocs.containsKey(type)
                 && !renderer.entityTexFailed.contains(type)) {
             tryResolveTexture(renderer, type, state);
         }
@@ -75,7 +75,6 @@ public abstract class MixinEntityRenderDispatcher {
                             if (Rentities.IS_DEBUG)
                                 Rentities.LOGGER.info("Found texture loc via state field {} = {}", f.getName(), loc);
                             renderer.entityTextureLocs.put(type, loc);
-                            renderer.entityGlTexIds.put(type, 1);
                             return;
                         }
                     }
@@ -133,7 +132,8 @@ public abstract class MixinEntityRenderDispatcher {
                                 if (loc != null) {
                                     // the new GpuTexture pipeline in 1.21.11
                                     renderer.entityTextureLocs.put(type, loc);
-                                    renderer.entityGlTexIds.put(type, 1);
+                                    int glId = me.balancinglight.rentities.entities.EntityGlTextureResolver.resolveGlId(loc);
+                                    if (glId > 0) renderer.entityGlTexIds.put(type, glId);
                                     if (Rentities.IS_DEBUG)
                                         Rentities.LOGGER.info("Cached texture loc for {}: {}", type, loc);
                                     return;

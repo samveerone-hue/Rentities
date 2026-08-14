@@ -212,7 +212,7 @@ public class EntityMeshBaker {
         var poseStack = new PoseStack();
 
         // Get the renderer map via reflection (field_4696 in 1.21.11 EntityRenderDispatcher)
-        Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer> rendererMap =
+        Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer<?, ?>> rendererMap =
                 getRendererMap(dispatcher);
 
         for (EntityType<?> type : EntityBatchRegistry.REGISTRY_TYPES()) {
@@ -227,7 +227,7 @@ public class EntityMeshBaker {
 
             // Try real extraction from renderer
             try {
-                net.minecraft.client.renderer.entity.EntityRenderer renderer = null;
+                net.minecraft.client.renderer.entity.EntityRenderer<?, ?> renderer = null;
                 if (rendererMap != null) {
                     renderer = rendererMap.get(type);
                 }
@@ -305,15 +305,15 @@ public class EntityMeshBaker {
         texturesBootstrapped = true;
     }
 
-    @SuppressWarnings("rawtypes")
-    private static Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer> getRendererMap(
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer<?, ?>> getRendererMap(
             net.minecraft.client.renderer.entity.EntityRenderDispatcher dispatcher) {
         if (cachedRendererMap != null) return cachedRendererMap;
         if (dispatcher == null) return null;
         try {
             Field f = net.minecraft.client.renderer.entity.EntityRenderDispatcher.class.getDeclaredField("field_4696");
             f.setAccessible(true);
-            cachedRendererMap = (Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer>) f.get(dispatcher);
+            cachedRendererMap = (Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer<?, ?>>) f.get(dispatcher);
             return cachedRendererMap;
         } catch (Exception e) {
             if (Rentities.IS_DEBUG) Rentities.LOGGER.error("Failed to access renderer map: {}", e.getMessage());
@@ -321,24 +321,22 @@ public class EntityMeshBaker {
         }
     }
 
-    @SuppressWarnings("rawtypes")
-    private static volatile Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer> cachedRendererMap = null;
+    private static volatile Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer<?, ?>> cachedRendererMap = null;
 
     private boolean texturesBootstrapped = false;
 
-    @SuppressWarnings("rawtypes")
     private static void bootstrapTextures(net.minecraft.client.renderer.entity.EntityRenderDispatcher dispatcher) {
         bootstrapTextures(dispatcher, getRendererMap(dispatcher));
     }
 
-    @SuppressWarnings("rawtypes")
+    @SuppressWarnings({"rawtypes", "unchecked"})
     private static void bootstrapTextures(
             net.minecraft.client.renderer.entity.EntityRenderDispatcher dispatcher,
-            Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer> rendererMap) {
+            Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer<?, ?>> rendererMap) {
         if (dispatcher == null || rendererMap == null) return;
         EntityBatchRenderer renderer = EntityBatchRenderer.INSTANCE;
         if (renderer == null) return;
-        EntityTextureBootstrap.bootstrap(renderer, rendererMap);
+        EntityTextureBootstrap.bootstrap(renderer, (Map) rendererMap);
     }
 
     /**
@@ -556,12 +554,6 @@ public class EntityMeshBaker {
             }
         } catch (Exception e) { }
     }
-
-    private void renderPartCubes(ModelPart part, EntityMeshCapturingConsumer consumer,
-                                   PoseStack poseStack) {
-        // Replaced by renderPartCubesDirectly
-    }
-
 
     /**
      * Extracts the EntityModel from a LivingEntityRenderer using reflection.
@@ -953,21 +945,10 @@ public class EntityMeshBaker {
 
     public int getPivotSSBOId() { return pivotSSBOId; }
 
-    // Cache format (little-endian binary):
-    //   [int magic=0xECAC1021] [int version=1]
-    //   [int entityTypeCount]
-    //   per type:
-    //     [int idLen] [byte[] id utf8]
-    //     [int vertexFloatCount] [float[] vertices]
-    //     [int indexCount]       [int[]   indices]
-    //     [int boneIdx0..7 pivotX,Y,Z,0 = 32 floats]  (bone pivot table for this type)
-    //     [int meshVertexOffset] [int meshIndexOffset] [int meshIndexCount]
-    //   [int pivotTableSize] [float[] full bonePivotData] (all types × MAX_BONES × 4)
-
     private static final int CACHE_MAGIC   = 0xECAC1021;
     private static final int CACHE_VERSION = 1;
 
-    /** Cache file location: .minecraft/nvidium_entity_mesh_cache.bin */
+    /** Cache file location: .minecraft/rentities_entity_mesh_cache.bin */
     private static java.io.File cacheFile = null;
 
     private static java.io.File getCacheFile() {

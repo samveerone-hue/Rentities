@@ -1,0 +1,97 @@
+#version 460 core
+
+// GPU-side frustum culling + draw-command compaction.
+//
+// One invocation per queued instance. The instance SSBO is uploaded in full (every entity
+// the client knows about, culled or not) exactly once; culling never removes anything from
+// it. Instead this pass writes a compacted *index* list and bumps the instanceCount of the
+// matching indirect draw command, so a culled entity costs one invocation here and zero
+// bytes of per-frame upload traffic. Nothing is read back to the CPU: the draw count that
+// glMultiDrawElementsIndirect consumes is produced and consumed entirely on the GPU.
+
+layout(local_size_x = 128) in;
+
+// Instance data is read as raw floats rather than as a struct: the layout is owned by
+// EntityInstance.java and the vertex shader, and re-declaring it here would be a third
+// copy to keep in sync. Only the fields the cull needs are decoded.
+#define INSTANCE_FLOATS 40   // EntityInstance.STRIDE / 4
+#define FIELD_POS_X     0
+#define FIELD_POS_Y     1
+#define FIELD_POS_Z     2
+#define FIELD_FLAGS     14   // EntityInstance.OFFSET_FLAGS / 4
+#define FLAG_IS_INVISIBLE 64
+
+layout(std430, binding = 12) readonly buffer EntityInstanceBuffer { float rawInstances[]; };
+
+// One entry per (entity type) draw group, built on the CPU from the type-sorted queue.
+struct DrawGroup {
+    uint firstInstance;   // index of the group's first instance in rawInstances
+    uint instanceCount;   // queued instances in the group (pre-cull)
+    float boundsRadius;   // bounding-sphere radius in blocks, animation slack included
+    float boundsCenterY;  // sphere centre above the entity's feet
+};
+layout(std430, binding = 14) readonly buffer DrawGroupBuffer { DrawGroup groups[]; };
+
+struct DrawElementsIndirectCommand {
+    uint count;
+    uint instanceCount;
+    uint firstIndex;
+    uint baseVertex;
+    uint baseInstance;
+};
+layout(std430, binding = 15) buffer DrawCommandBuffer { DrawElementsIndirectCommand cmds[]; };
+
+// Compacted instance indices. Slot g of this buffer starts at groups[g].firstInstance, so
+// no prefix sum is needed: worst case (nothing culled) each group fits in its own range.
+layout(std430, binding = 16) writeonly buffer VisibleIndexBuffer { uint visibleIndices[]; };
+
+// Camera-relative frustum planes (xyz = normal, w = distance), same space as the instance
+// positions, so no per-entity world transform is needed here.
+uniform vec4 uFrustumPlanes[6];
+uniform uint uGroupCount;
+uniform uint uInstanceCount;
+
+// groups[] is ordered by firstInstance, so the owning group of an instance is a binary
+// search over a handful of entries — cheaper than a second dispatch dimension, which would
+// pad every group out to the largest group's size.
+uint findGroup(uint instanceIndex) {
+    uint lo = 0u;
+    uint hi = uGroupCount - 1u;
+    while (lo < hi) {
+        uint mid = (lo + hi + 1u) / 2u;
+        if (groups[mid].firstInstance <= instanceIndex) lo = mid; else hi = mid - 1u;
+    }
+    return lo;
+}
+
+bool insideFrustum(vec3 centre, float radius) {
+    for (int i = 0; i < 6; ++i) {
+        if (dot(uFrustumPlanes[i].xyz, centre) + uFrustumPlanes[i].w < -radius) return false;
+    }
+    return true;
+}
+
+void main() {
+    uint instanceIndex = gl_GlobalInvocationID.x;
+    if (instanceIndex >= uInstanceCount || uGroupCount == 0u) return;
+
+    uint g = findGroup(instanceIndex);
+    DrawGroup group = groups[g];
+    // Instances of a type with no baked mesh are never given a group, so an index can land
+    // outside every group's range; those must not be drawn as part of a neighbouring group.
+    if (instanceIndex < group.firstInstance
+        || instanceIndex >= group.firstInstance + group.instanceCount) return;
+
+    uint base = instanceIndex * uint(INSTANCE_FLOATS);
+    int flags = floatBitsToInt(rawInstances[base + uint(FIELD_FLAGS)]);
+    if ((flags & FLAG_IS_INVISIBLE) != 0) return;
+
+    vec3 centre = vec3(rawInstances[base + uint(FIELD_POS_X)],
+                       rawInstances[base + uint(FIELD_POS_Y)] + group.boundsCenterY,
+                       rawInstances[base + uint(FIELD_POS_Z)]);
+
+    if (!insideFrustum(centre, group.boundsRadius)) return;
+
+    uint slot = atomicAdd(cmds[g].instanceCount, 1u);
+    visibleIndices[group.firstInstance + slot] = instanceIndex;
+}

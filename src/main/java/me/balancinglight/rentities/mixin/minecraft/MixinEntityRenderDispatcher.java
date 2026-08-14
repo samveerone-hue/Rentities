@@ -5,6 +5,7 @@ import me.balancinglight.rentities.entities.EntityBatchRenderer;
 import me.balancinglight.rentities.entities.EntityBatchRegistry;
 import me.balancinglight.rentities.entities.EntityAnimationCategory;
 import me.balancinglight.rentities.entities.EntityDirectExtractor;
+import me.balancinglight.rentities.entities.EntityGlTextureResolver;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.EntityType;
 import org.spongepowered.asm.mixin.Mixin;
@@ -132,7 +133,7 @@ public abstract class MixinEntityRenderDispatcher {
                                 if (loc != null) {
                                     // the new GpuTexture pipeline in 1.21.11
                                     renderer.entityTextureLocs.put(type, loc);
-                                    int glId = me.balancinglight.rentities.entities.EntityGlTextureResolver.resolveGlId(loc);
+                                    int glId = EntityGlTextureResolver.resolveGlId(loc);
                                     if (glId > 0) renderer.entityGlTexIds.put(type, glId);
                                     if (Rentities.IS_DEBUG)
                                         Rentities.LOGGER.info("Cached texture loc for {}: {}", type, loc);
@@ -155,5 +156,4 @@ public abstract class MixinEntityRenderDispatcher {
             Rentities.LOGGER.warn("Could not resolve texture for {}", type);
         renderer.entityTexFailed.add(type);
     }
-
 }

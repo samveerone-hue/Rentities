@@ -37,9 +37,16 @@ struct EntityInstance {
 };
 layout(std430, binding = 12) buffer EntityInstanceBuffer { EntityInstance instances[]; };
 
+// Compacted list of surviving instance indices, written by entity_cull.comp. Slot i of a
+// draw group lives at gl_BaseInstance + i, which the indirect command sets to the group's
+// first instance, so the vertex shader needs no per-group uniform.
+layout(std430, binding = 16) readonly buffer VisibleIndexBuffer { uint visibleIndices[]; };
+
 uniform mat4 uViewProjection;
 uniform float uGameTime;
+// Only used on the direct-draw fallback path; the indirect path indexes via gl_BaseInstance.
 uniform int  uBaseInstance;
+uniform int  uIndirect;
 
 out vec2      vTexCoord;
 out flat int  vFlags;
@@ -468,7 +475,9 @@ mat4 getBoneTransform(int cat, int bone, EntityInstance inst){
 // MAIN
 // ─────────────────────────────────────────────────────────────────────────────
 void main(){
-    int instanceID = gl_InstanceID + uBaseInstance;
+    int instanceID = uIndirect != 0
+        ? int(visibleIndices[gl_BaseInstance + gl_InstanceID])
+        : gl_InstanceID + uBaseInstance;
     EntityInstance inst = instances[instanceID];
     int bone = int(aBoneIndex);
 

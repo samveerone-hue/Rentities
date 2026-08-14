@@ -1,0 +1,46 @@
+name: Build & Test Helium 26.1.2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout repository code
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Java Development Kit (JDK 25 required for Minecraft 26.x / Fabric)
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+
+      # Step 3: Validate Gradle Wrapper
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v3
+
+      # Step 4: Setup Gradle & Caching
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          cache-read-only: false
+
+      # Step 5: Grant execute permission for Gradle wrapper
+      - name: Make gradlew Executable
+        run: chmod +x ./gradlew
+
+      # Step 6: Build project and run tests
+      - name: Build with Gradle
+        run: ./gradlew build --no-daemon
+
+      # Step 7: Upload build artifacts (.jar files)
+      - name: Upload Mod Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: helium-26.1.2-build
+          path: build/libs/*.jar
+          retention-days: 7

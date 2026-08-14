@@ -12,7 +12,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Step 2: Set up Java 21 (Required for MC 1.21.x / Gradle 8.x)
+      # Step 2: Set up JDK 21 (Required for Gradle 8.x + MC 1.21.x)
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -25,15 +25,19 @@ jobs:
         with:
           cache-read-only: false
 
-      # Step 4: Grant execute permission for Gradle wrapper
+      # Step 4: Repair corrupt wrapper binary on the runner
+      - name: Repair Gradle Wrapper
+        run: gradle wrapper --gradle-version 8.11.1
+
+      # Step 5: Grant execute permission for Gradle wrapper
       - name: Make gradlew Executable
         run: chmod +x ./gradlew
 
-      # Step 5: Build project and run tests
+      # Step 6: Build project
       - name: Build with Gradle
         run: ./gradlew build --no-daemon
 
-      # Step 6: Upload build artifacts (.jar files)
+      # Step 7: Upload build artifacts (.jar files)
       - name: Upload Mod Artifacts
         uses: actions/upload-artifact@v4
         with:

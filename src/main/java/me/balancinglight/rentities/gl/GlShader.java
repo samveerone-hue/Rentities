@@ -3,6 +3,7 @@ package me.balancinglight.rentities.gl;
 import me.balancinglight.rentities.Rentities;
 
 import static org.lwjgl.opengl.GL20C.*;
+import static org.lwjgl.opengl.GL43C.GL_COMPUTE_SHADER;
 
 public class GlShader {
 
@@ -24,13 +25,22 @@ public class GlShader {
     public static Builder builder() { return new Builder(); }
 
     public static class Builder {
-        private String vertSource, fragSource;
+        private String vertSource, fragSource, compSource;
 
         public Builder vert(String src) { this.vertSource = src; return this; }
         public Builder frag(String src) { this.fragSource = src; return this; }
+        public Builder comp(String src) { this.compSource = src; return this; }
 
         public GlShader compile() {
             int program = glCreateProgram();
+
+            if (compSource != null) {
+                int comp = compileStage(GL_COMPUTE_SHADER, compSource, "compute");
+                glAttachShader(program, comp);
+                glLinkProgram(program);
+                glDetachShader(program, comp); glDeleteShader(comp);
+                return finish(program);
+            }
 
             int vert = compileStage(GL_VERTEX_SHADER,   vertSource, "vertex");
             int frag = compileStage(GL_FRAGMENT_SHADER, fragSource, "fragment");
@@ -41,6 +51,11 @@ public class GlShader {
 
             glDetachShader(program, vert); glDeleteShader(vert);
             glDetachShader(program, frag); glDeleteShader(frag);
+
+            return finish(program);
+        }
+
+        private static GlShader finish(int program) {
 
             String log = glGetProgramInfoLog(program);
             if (!log.isBlank()) Rentities.LOGGER.info("Shader link log: {}", log);

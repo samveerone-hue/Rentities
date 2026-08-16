@@ -27,7 +27,19 @@ public abstract class MixinEntityRenderDispatcher {
             CallbackInfo ci) {
 
         if (!Rentities.IS_ENABLED) return;
+
+        /*
+         * Some entities are rendered as part of another renderer rather than
+         * as normal world entities. Mob spawner previews are the important
+         * example: the preview mob is rendered using a temporary local
+         * PoseStack and must not be converted into a world-space Rentities
+         * instance.
+         *
+         * EntityDirectExtractor maintains this guard with a ThreadLocal so
+         * nested/special renders can temporarily opt out of batching.
+         */
         if (EntityDirectExtractor.isSkippingBatching()) return;
+
         if (state == null) return;
 
         // Already queued by the direct extraction hook — nothing was ever populated on this

@@ -12,6 +12,7 @@ import org.lwjgl.system.MemoryUtil;
 
 import java.lang.reflect.Field;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -85,6 +86,14 @@ public class EntityBatchRenderer {
 
     private static final Map<Class<?>, Map<String, Field>> fieldCache = new ConcurrentHashMap<>();
 
+    /*
+     * Keys are "class → logical field name" pairs for fields we could not resolve.
+     * Warnings are logged once per key so mapping-broken diagnostics do not spam
+     * the log every frame.
+     */
+    private static final Set<String> reflectionMissingWarned =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
+
     // Entity type -> texture ResourceLocation; GL ids cached separately in entityGlTexIds
     public final java.util.Map<EntityType<?>, Object> entityTextureLocs = new ConcurrentHashMap<>();
     public final java.util.Map<EntityType<?>, Integer> entityGlTexIds = new ConcurrentHashMap<>();
@@ -112,17 +121,25 @@ public class EntityBatchRenderer {
         compileShader();
     }
 
-    public static void queueEntityStateDirect(Object state, double x, double y, double z,
-                                              EntityType<?> type) {
-        if (INSTANCE == null) return;
+    public static boolean queueEntityStateDirect(Object state, double x, double y, double z,
+                                                 EntityType<?> type) {
+        if (INSTANCE == null) return false;
         int idx = queueSize.getAndIncrement();
-        if (idx < MAX_QUEUE) {
-            queuedTypes[idx] = type;
-            extractionTypes[idx] = type;
-            queuedOriginalIndices[idx] = idx;
-            INSTANCE.writeEntityInstance(
-                extractionBuffer + (long)idx * EntityInstance.STRIDE, state, x, y, z);
+        if (idx >= MAX_QUEUE) {
+            queueSize.decrementAndGet();
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.warn(
+                        "[RentEntities] Instance queue full ({}); falling back to vanilla rendering",
+                        MAX_QUEUE);
+            }
+            return false;
         }
+        queuedTypes[idx] = type;
+        extractionTypes[idx] = type;
+        queuedOriginalIndices[idx] = idx;
+        INSTANCE.writeEntityInstance(
+            extractionBuffer + (long) idx * EntityInstance.STRIDE, state, x, y, z);
+        return true;
     }
 
     /**
@@ -133,7 +150,15 @@ public class EntityBatchRenderer {
     public static long reserveInstance(EntityType<?> type) {
         if (INSTANCE == null) return 0L;
         int idx = queueSize.getAndIncrement();
-        if (idx >= MAX_QUEUE) return 0L;
+        if (idx >= MAX_QUEUE) {
+            queueSize.decrementAndGet();
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.warn(
+                        "[Rentities] Instance queue full ({}); falling back to vanilla rendering",
+                        MAX_QUEUE);
+            }
+            return 0L;
+        }
         queuedTypes[idx] = type;
         extractionTypes[idx] = type;
         queuedOriginalIndices[idx] = idx;
@@ -500,41 +525,37 @@ public class EntityBatchRenderer {
             this.swimProgress   = mhFloat(cls,   "field_53451", "swimAmount", "ag");
             this.hurtTime       = mhBool(cls,    "field_53456", "isHurt", "al");
             this.sneaking       = mhBool(cls,    "field_53455", "isSneaking", "ak");
-            this.type           = mhObj(cls,     "field_58171", "entityType", "H");
+            this.type           = requireObj(cls, "field_58171", "entityType", "H");
             this.texture        = mhObj(cls,     "field_53336", "texture", "V");
             this.invisible      = mhBool(cls,    "field_53333", "invisible", "Q");
             this.onGround       = mhBool(cls,    "field_53334", "onGround", "R");
             this.inWater        = mhBool(cls,    "field_53335", "inWater", "S");
         }
 
-        private static java.lang.invoke.MethodHandle mhFloat(Class<?> cls, String... names) {
-            Field f = findField(cls, float.class, names);
-            if (f == null) return null;
-            try {
-                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
-                    .asType(java.lang.invoke.MethodType.methodType(float.class, Object.class));
-            } catch (Exception e) { return null; }
+        /**
+         * Logs a one-time warning naming the class, the failing state field and every
+         * candidate mapping name that was attempted. Because render-state classes are
+         * registered per-class through the ClassValue cache, this fires at most once per
+         * (class, field) pair instead of spamming the log every frame.
+         */
+        private static void warnUnresolved(Class<?> cls, String logical, String... names) {
+            String key = cls.getName() + "#" + logical;
+            if (!reflectionMissingWarned.add(key)) return;
+            StringBuilder sb = new StringBuilder();
+            sb.append('[');
+            for (int i = 0; i < names.length; i++) {
+                if (i > 0) sb.append(", ");
+                sb.append('"').append(names[i]).append('"');
+            }
+            sb.append(']');
+            Rentities.LOGGER.warn(
+                    "[Rentities] Reflection: could not resolve state field '{}' on class {} "
+                            + "(tried names: {})."
+                            + " Entities of this type may render with reduced/missing animation.",
+                    logical, cls.getName(), sb);
         }
 
-        private static java.lang.invoke.MethodHandle mhBool(Class<?> cls, String... names) {
-            Field f = findField(cls, boolean.class, names);
-            if (f == null) return null;
-            try {
-                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
-                    .asType(java.lang.invoke.MethodType.methodType(boolean.class, Object.class));
-            } catch (Exception e) { return null; }
-        }
-
-        private static java.lang.invoke.MethodHandle mhObj(Class<?> cls, String... names) {
-            Field f = findField(cls, null, names);
-            if (f == null) return null;
-            try {
-                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
-                    .asType(java.lang.invoke.MethodType.methodType(Object.class, Object.class));
-            } catch (Exception e) { return null; }
-        }
-
-        private static Field findField(Class<?> cls, Class<?> type, String... names) {
+        private static Field findField(Class<?> cls, Class<?> type, String logical, String... names) {
             for (String name : names) {
                 Class<?> c = cls;
                 while (c != null) {
@@ -548,7 +569,65 @@ public class EntityBatchRenderer {
                     c = c.getSuperclass();
                 }
             }
+            warnUnresolved(cls, logical, names);
             return null;
+        }
+
+        /** Optional float — null when absent; consumers already treat null as 0f. */
+        private static java.lang.invoke.MethodHandle mhFloat(Class<?> cls, String... names) {
+            Field f = findField(cls, float.class, "float", names);
+            if (f == null) return null;
+            try {
+                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
+                    .asType(java.lang.invoke.MethodType.methodType(float.class, Object.class));
+            } catch (Exception e) { return null; }
+        }
+
+        /** Optional boolean — null when absent; consumers already treat null as false. */
+        private static java.lang.invoke.MethodHandle mhBool(Class<?> cls, String... names) {
+            Field f = findField(cls, boolean.class, "boolean", names);
+            if (f == null) return null;
+            try {
+                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
+                    .asType(java.lang.invoke.MethodType.methodType(boolean.class, Object.class));
+            } catch (Exception e) { return null; }
+        }
+
+        /** Optional object — null when absent. */
+        private static java.lang.invoke.MethodHandle mhObj(Class<?> cls, String... names) {
+            Field f = findField(cls, null, "object", names);
+            if (f == null) return null;
+            try {
+                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
+                    .asType(java.lang.invoke.MethodType.methodType(Object.class, Object.class));
+            } catch (Exception e) { return null; }
+        }
+
+        /**
+         * Mandatory object field. Missing it means the fallback queued-state
+         * extraction cannot know which entity type the state represents, so it
+         * could never render correctly. Produce a clear diagnostic and return null
+         * (callers already guard for null and will fall back to vanilla).
+         */
+        private static java.lang.invoke.MethodHandle requireObj(Class<?> cls, String... names) {
+            Field f = findField(cls, null, "object(mandatory)", names);
+            if (f == null) {
+                Rentities.LOGGER.error(
+                        "[RentEntities] MANDATORY reflection field missing for class {} "
+                                + "(tried names: {}). The entity state cannot be queued and "
+                                + "will fall back to vanilla rendering.",
+                        cls.getName(), java.util.Arrays.toString(names));
+                return null;
+            }
+            try {
+                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
+                    .asType(java.lang.invoke.MethodType.methodType(Object.class, Object.class));
+            } catch (Exception e) {
+                Rentities.LOGGER.error(
+                        "[RenderSystem] Failed to build method handle for mandatory field {}: {}",
+                        f.getName(), e.toString());
+                return null;
+            }
         }
     }
 

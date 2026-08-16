@@ -6,10 +6,17 @@ import net.minecraft.client.renderer.entity.ArmorStandRenderer;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.state.ArmorStandRenderState;
 import net.minecraft.core.Rotations;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.TamableAnimal;
+import net.minecraft.world.entity.animal.armadillo.Armadillo;
 import net.minecraft.world.entity.decoration.ArmorStand;
+import net.minecraft.world.entity.monster.Creeper;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.phys.Vec3;
 import org.lwjgl.system.MemoryUtil;
 
@@ -109,6 +116,13 @@ public final class EntityDirectExtractor {
         float sneakProgress = 0f;
         float hurtTime = 0f;
         float deathTime = 0f;
+        float bowPull = 0f;
+        float riptide = 0f;
+        float sitProgress = 0f;
+        float eatProgress = 0f;
+        float swellAmount = 0f;
+        float explodeProgress = 0f;
+        float rollProgress = 0f;
 
         /*
          * Armor-stand pose data is not derived from the normal LivingEntity animation
@@ -205,6 +219,55 @@ public final class EntityDirectExtractor {
                 if (living.deathTime > 0) {
                     deathTime = Math.min(living.deathTime, 20f);
                 }
+
+                /*
+                 * Bow pull — vanilla draws over 20 ticks, 0 → 1.
+                 * LivingEntity#getTicksUsingItem(partialTick) mirrors the RenderState's
+                 * useItemTicks used by vanilla item rendering.
+                 */
+                ItemStack useItem = living.getUseItem();
+                if (living.isUsingItem() && !useItem.isEmpty()) {
+                    ItemUseAnimation useAnim = useItem.getUseAnimation();
+
+                    if (useAnim == ItemUseAnimation.BOW) {
+                        bowPull = net.minecraft.util.Mth.clamp(
+                                living.getTicksUsingItem(partialTick) / 20f, 0f, 1f);
+                    } else if (useAnim == ItemUseAnimation.EAT
+                            || useAnim == ItemUseAnimation.DRINK) {
+                        int remaining = Math.max(0, living.getUseItemRemainingTicks());
+                        int maxUseDuration = Math.max(1, useItem.getUseDuration(living));
+                        float charge = 1f - Math.min(remaining, maxUseDuration) / (float) maxUseDuration;
+                        eatProgress = net.minecraft.util.Mth.clamp(charge, 0f, 1f);
+                    }
+                }
+
+                if (entity instanceof Creeper creeper) {
+                    // Vanilla interpolated swelling — matches CreeperRenderer.extractRenderState.
+                    swellAmount = creeper.getSwelling(partialTick);
+
+                    // Explosion/death animation uses the vanilla death timeline (0..20 ticks).
+                    if (creeper.deathTime > 0) {
+                        explodeProgress = net.minecraft.util.Mth.clamp(
+                                creeper.deathTime / 20f, 0f, 1f);
+                    }
+                }
+
+                if (entity instanceof Armadillo armadillo) {
+                    // Roll-up progress = time spent rolling, driven by vanilla's state.
+                    if (armadillo.rollUpAnimationState.isStarted()) {
+                        rollProgress = net.minecraft.util.Mth.clamp(
+                                (float) armadillo.rollUpAnimationState.getTimeInMillis(partialTick) / 1000f,
+                                0f, 1f);
+                    }
+                }
+
+                if (entity instanceof TamableAnimal tamable && tamable.isInSittingPose()) {
+                    sitProgress = 1f;
+                }
+
+                if (living.isAutoSpinAttack()) {
+                    riptide = 1f;
+                }
             } else {
                 bodyYawDeg = entity.getViewYRot(partialTick);
             }
@@ -235,7 +298,7 @@ public final class EntityDirectExtractor {
                 attackProgress);
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_BOW_PULL,
-                0f);
+                bowPull);
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_HURT_TIME,
                 hurtTime);
@@ -250,22 +313,22 @@ public final class EntityDirectExtractor {
                 swimProgress);
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_RIPTIDE,
-                0f);
+                riptide);
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_SIT_PROGRESS,
-                0f);
+                sitProgress);
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_EAT_PROGRESS,
-                0f);
+                eatProgress);
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_SWELL_AMOUNT,
-                0f);
+                swellAmount);
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_EXPLODE_PROGRESS,
-                0f);
+                explodeProgress);
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_ROLL_PROGRESS,
-                0f);
+                rollProgress);
 
         int flags = 0;
 
@@ -314,29 +377,45 @@ public final class EntityDirectExtractor {
                 ptr + EntityInstance.OFFSET_TEXTURE_LAYER,
                 0);
 
-        MemoryUtil.memPutInt(
-                ptr + EntityInstance.OFFSET_HELD_MAIN,
-                EntityInstance.NO_ITEM);
+        /*
+         * Equipment extraction.
+         *
+         * Rentities' GPU mesh pipeline bakes the bare entity model and cannot currently
+         * render arbitrary item models (the shader keeps these int fields for future use but
+         * never samples them). We therefore:
+         *
+         *   1. Extract the true equipment state from the LivingEntity's slots so the data
+         *      is correct and future-proof.
+         *   2. Encode each slot as a stable integer ID that the renderer can later map to a
+         *      mesh/texture — currently a datapack-independent raw item ID.
+         *   3. Keep the NO_ITEM / NO_ARMOR sentinels as the fallback so the GPU instance
+         *      payload is always valid.
+         *
+         * Nothing is invented: the IDs come from BuiltInRegistries.ITEM and the empty-stack
+         * test matches vanilla's ItemStack#isEmpty.
+         */
+        int heldMain = EntityInstance.NO_ITEM;
+        int heldOffhand = EntityInstance.NO_ITEM;
+        int armorHead = EntityInstance.NO_ARMOR;
+        int armorChest = EntityInstance.NO_ARMOR;
+        int armorLegs = EntityInstance.NO_ARMOR;
+        int armorFeet = EntityInstance.NO_ARMOR;
 
-        MemoryUtil.memPutInt(
-                ptr + EntityInstance.OFFSET_HELD_OFFHAND,
-                EntityInstance.NO_ITEM);
+        if (entity instanceof LivingEntity livingEquip) {
+            heldMain = itemId(livingEquip.getItemBySlot(EquipmentSlot.MAINHAND));
+            heldOffhand = itemId(livingEquip.getItemBySlot(EquipmentSlot.OFFHAND));
+            armorHead = itemId(livingEquip.getItemBySlot(EquipmentSlot.HEAD));
+            armorChest = itemId(livingEquip.getItemBySlot(EquipmentSlot.CHEST));
+            armorLegs = itemId(livingEquip.getItemBySlot(EquipmentSlot.LEGS));
+            armorFeet = itemId(livingEquip.getItemBySlot(EquipmentSlot.FEET));
+        }
 
-        MemoryUtil.memPutInt(
-                ptr + EntityInstance.OFFSET_ARMOR_HEAD,
-                EntityInstance.NO_ARMOR);
-
-        MemoryUtil.memPutInt(
-                ptr + EntityInstance.OFFSET_ARMOR_CHEST,
-                EntityInstance.NO_ARMOR);
-
-        MemoryUtil.memPutInt(
-                ptr + EntityInstance.OFFSET_ARMOR_LEGS,
-                EntityInstance.NO_ARMOR);
-
-        MemoryUtil.memPutInt(
-                ptr + EntityInstance.OFFSET_ARMOR_FEET,
-                EntityInstance.NO_ARMOR);
+        MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_HELD_MAIN,  heldMain);
+        MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_HELD_OFFHAND, heldOffhand);
+        MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_HEAD,  armorHead);
+        MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_CHEST, armorChest);
+        MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_LEGS,  armorLegs);
+        MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_FEET,  armorFeet);
 
         MemoryUtil.memPutInt(
                 ptr + EntityInstance.OFFSET_MOUNT_ID,
@@ -453,6 +532,26 @@ public final class EntityDirectExtractor {
         for (int offset : offsets) {
             writeArmorStandPose(ptr + offset, 0f, 0f, 0f);
         }
+    }
+
+    /**
+     * Maps an {@link ItemStack} to a stable int ID for the instance payload.
+     *
+     * <p>The ID is the raw {@link net.minecraft.resources.ResourceLocation} hash sequence
+     * from {@link BuiltInRegistries#ITEM} — datapack-independent and stable within a
+     * session. Empty stacks map to {@link EntityInstance#NO_ITEM} / {@link EntityInstance#NO_ARMOR}
+     * so the absence of equipment keeps the existing sentinel semantics.
+     *
+     * <p>The GPU mesh pipeline currently bakes bare entity meshes and the shader does not
+     * sample the item/armor fields, so these IDs are for future item-model rendering. We
+     * deliberately fall back to the existing sentinel values instead of inventing arbitrary
+     * render IDs.
+     */
+    private static int itemId(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) {
+            return EntityInstance.NO_ITEM;
+        }
+        return BuiltInRegistries.ITEM.getId(stack.getItem());
     }
 
     private static float lerpDegrees(float t, float from, float to) {

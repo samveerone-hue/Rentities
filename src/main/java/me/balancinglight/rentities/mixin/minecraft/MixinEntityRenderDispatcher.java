@@ -70,10 +70,12 @@ public abstract class MixinEntityRenderDispatcher {
             tryResolveTexture(renderer, type, state);
         }
 
-        EntityBatchRenderer.queueEntityStateDirect(state, x, y, z, type);
+        boolean queued = EntityBatchRenderer.queueEntityStateDirect(state, x, y, z, type);
         if (Rentities.IS_DEBUG)
-            Rentities.LOGGER.info("Queued entity type={}, category={}", type, category);
-        ci.cancel();
+            Rentities.LOGGER.info("Queued entity type={}, category={}, queued={}", type, category, queued);
+        if (queued) {
+            ci.cancel();
+        }
     }
 
     private void tryResolveTexture(EntityBatchRenderer renderer, EntityType<?> type, Object state) {

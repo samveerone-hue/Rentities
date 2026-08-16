@@ -61,8 +61,12 @@ public class EntityBatchRenderer {
     private final GpuRingBuffer instanceRing;
     private final GpuFenceRing fenceRing = new GpuFenceRing(NUM_BUFFERS);
     private final EntityCullingPipeline cullPipeline;
+    private static final int SSBO_BINDING = 12;
+    private static final int PIVOT_SSBO_BINDING = 13;
+
     private final GlStateGuard stateGuard = new GlStateGuard(
             SSBO_BINDING,
+            PIVOT_SSBO_BINDING,
             EntityCullingPipeline.GROUP_SSBO_BINDING,
             EntityCullingPipeline.CMD_SSBO_BINDING,
             EntityCullingPipeline.VISIBLE_SSBO_BINDING);

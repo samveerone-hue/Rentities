@@ -718,11 +718,31 @@ public class EntityBatchRenderer {
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ROLL_PROGRESS,   0f);
 
             int flags = 0;
-            if (acc.invisible != null && (boolean) acc.invisible.invoke(state)) flags |= EntityInstance.FLAG_IS_INVISIBLE;
-            if (acc.onGround  != null && (boolean) acc.onGround.invoke(state))  flags |= EntityInstance.FLAG_ON_GROUND;
-            if (acc.inWater   != null && (boolean) acc.inWater.invoke(state))   flags |= EntityInstance.FLAG_IS_IN_WATER;
-            if (type == EntityType.PLAYER) flags |= EntityInstance.FLAG_IS_PLAYER;
-            if (type != null && EntityBatchRegistry.hasZombieArms(type)) flags |= EntityInstance.FLAG_ZOMBIE_ARMS;
+
+            if (acc.invisible != null && (boolean) acc.invisible.invoke(state)) {
+                flags |= EntityInstance.FLAG_IS_INVISIBLE;
+            }
+
+            if (acc.onGround != null && (boolean) acc.onGround.invoke(state)) {
+                flags |= EntityInstance.FLAG_ON_GROUND;
+            }
+
+            if (acc.inWater != null && (boolean) acc.inWater.invoke(state)) {
+                flags |= EntityInstance.FLAG_IS_IN_WATER;
+            }
+
+            if (type == EntityType.PLAYER) {
+                flags |= EntityInstance.FLAG_IS_PLAYER;
+            }
+
+            if (type != null && EntityBatchRegistry.hasZombieArms(type)) {
+                flags |= EntityInstance.FLAG_ZOMBIE_ARMS;
+            }
+
+            if (type == EntityType.ARMOR_STAND) {
+                flags |= EntityInstance.FLAG_ARMOR_STAND;
+            }
+
             MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_FLAGS, flags);
 
             int typeIdx  = type != null ? EntityBatchRegistry.getEntityTypeIndex(type) : 0;

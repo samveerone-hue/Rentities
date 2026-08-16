@@ -14,7 +14,7 @@ layout(local_size_x = 128) in;
 // Instance data is read as raw floats rather than as a struct: the layout is owned by
 // EntityInstance.java and the vertex shader, and re-declaring it here would be a third
 // copy to keep in sync. Only the fields the cull needs are decoded.
-#define INSTANCE_FLOATS 40   // EntityInstance.STRIDE / 4
+#define INSTANCE_FLOATS 64   // EntityInstance.STRIDE / 4
 #define FIELD_POS_X     0
 #define FIELD_POS_Y     1
 #define FIELD_POS_Z     2

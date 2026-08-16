@@ -413,7 +413,20 @@ public class EntityBatchRenderer {
             if (meshInfo != null) {
                 int g = cullPipeline.addGroup(meshInfo.indexCount, meshInfo.indexOffset,
                         runStart, i - runStart, type);
-                if (g < 0) break;
+                if (g < 0) {
+                    /*
+                     * Group-table overflow: drawing a partial group table would silently
+                     * drop every type after index 256. Abort indirect entirely; the
+                     * caller (doFlush) falls back to CPU-ordered rendering.
+                     */
+                    if (Rentities.IS_DEBUG) {
+                        Rentities.LOGGER.warn(
+                                "[Rentities] Indirect draw group table overflow (>{}) — "
+                                        + "falling back to CPU-ordered drawing",
+                                MAX_DRAW_GROUPS);
+                    }
+                    return false;
+                }
                 groupTypes[g] = type;
             }
             runStart = i;
@@ -670,28 +683,41 @@ public class EntityBatchRenderer {
         }
     }
 
-    /** Binds the entity type's texture to unit 0 and returns the GL name, or 0 on failure. */
-    private int bindEntityTexture(EntityType<?> type) {
-        if (type == null) return 0;
+    /** Binds the entity type's texture to unit 0; returns true on success. */
+    private boolean bindEntityTexture(EntityType<?> type) {
+        if (type == null) return false;
 
         Integer cached = entityGlTexIds.get(type);
         if (cached != null && cached > 0) {
-            bindTextureUnit0(cached);
-            return cached;
+            if (!glIsTexture(cached)) {
+                entityGlTexIds.remove(type);
+            } else {
+                bindTextureUnit0(cached);
+                return true;
+            }
         }
 
         Object loc = entityTextureLocs.get(type);
-        if (loc == null) return 0;
+        if (loc == null) {
+            unbindTextureUnit0();
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.warn("[Rentities] No texture location for {}; unbinding unit 0", type);
+            }
+            return false;
+        }
 
         int glId = EntityGlTextureResolver.resolveGlId(loc);
         if (glId > 0) {
             entityGlTexIds.put(type, glId);
             bindTextureUnit0(glId);
-            return glId;
+            return true;
         }
 
         ensureTexMethodsCached();
-        if (cachedTextureManager == null) return 0;
+        if (cachedTextureManager == null) {
+            unbindTextureUnit0();
+            return false;
+        }
         resolveTexMethods(loc);
         try {
             if (cachedBindTexMethod != null)
@@ -713,27 +739,31 @@ public class EntityBatchRenderer {
                             if (f.getType() == int.class) {
                                 f.setAccessible(true);
                                 int id = f.getInt(gpuTex);
-                                if (id > 0) {
+                                if (id > 0 && glIsTexture(id)) {
                                     entityGlTexIds.put(type, id);
                                     bindTextureUnit0(id);
-                                    return id;
+                                    return true;
                                 }
++++++++
+ REPLACE
                             }
                         }
                     }
                 }
             }
-
-            int fallbackId = glGetInteger(GL_TEXTURE_BINDING_2D);
-            if (fallbackId > 0) {
-                entityGlTexIds.put(type, fallbackId);
-                bindTextureUnit0(fallbackId);
-                return fallbackId;
-            }
         } catch (Exception e) {
             if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("bindEntityTexture failed: {}", e.getMessage());
         }
-        return 0;
+        // Never reuse whatever texture is currently bound on unit 0.
+        unbindTextureUnit0();
+        return false;
+    }
+
+    /** Binds texture unit 0 to 0 so a stale entity texture can never be re-sampled. */
+    private void unbindTextureUnit0() {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        lastBoundGlTexId = 0;
     }
 
     private void bindTextureUnit0(int glId) {

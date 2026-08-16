@@ -26,7 +26,7 @@ import static org.lwjgl.opengl.GL45C.*;
 public class EntityMeshBaker {
 
     public static final int VERTEX_STRIDE = 36; // 9 floats × 4 bytes
-    public static final int MAX_BONES        = 8;
+    public static final int MAX_BONES        = 10;
     public static final int MAX_ENTITY_TYPES = 256;
 
     // Pivot data: [typeIdx * MAX_BONES + boneIdx] * 4 floats (x,y,z,0)

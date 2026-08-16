@@ -444,16 +444,19 @@ public class EntityBatchRenderer {
     }
 
     private static class StateAccessor {
-        final java.lang.invoke.MethodHandle yaw, limbSwing, limbSwingAmt, headYaw, headPitch, attackProgress;
+        final java.lang.invoke.MethodHandle yaw, yawO, limbSwing, limbSwingAmt, headYaw, headYawO, headPitch, headPitchO, attackProgress;
         final java.lang.invoke.MethodHandle deathTime, swimProgress, hurtTime, sneaking;
         final java.lang.invoke.MethodHandle type, texture, invisible, onGround, inWater;
 
         StateAccessor(Class<?> cls) {
             this.yaw            = mhFloat(cls,   "field_53329", "yBodyRot", "M");
+            this.yawO           = mhFloat(cls,   "yBodyRotO", "prevYBodyRot");
             this.limbSwing      = mhFloat(cls,   "field_53446", "walkAnimationPos", "ab");
             this.limbSwingAmt   = mhFloat(cls,   "field_53447", "walkAnimationSpeed", "ac");
             this.headYaw        = mhFloat(cls,   "field_53448", "headYaw", "ad");
+            this.headYawO       = mhFloat(cls,   "yHeadRotO", "prevYHeadRot");
             this.headPitch      = mhFloat(cls,   "field_53449", "headPitch", "ae");
+            this.headPitchO     = mhFloat(cls,   "xRotO", "prevXRot");
             this.attackProgress = mhFloat(cls,   "field_53450", "attackAnim", "af");
             this.deathTime      = mhFloat(cls,   "field_53452", "deathTime", "ah");
             this.swimProgress   = mhFloat(cls,   "field_53451", "swimAmount", "ag");
@@ -623,7 +626,7 @@ public class EntityBatchRenderer {
         glUniform1i(uEntityTextures, 0);
         lastBoundGlTexId = glId;
     }
-
+    
     public void writeEntityInstance(long ptr, Object state, double rx, double ry, double rz) {
         if (state == null) return;
         StateAccessor acc = ACCESSOR_CACHE.get(state.getClass());
@@ -632,7 +635,15 @@ public class EntityBatchRenderer {
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_POSITION_Y, (float) ry);
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_POSITION_Z, (float) rz);
 
+            // Fetch partialTick for interpolation
+            float partialTick = Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(true);
+
+            // 1. Interpolate Body Yaw
             float yawDeg = acc.yaw != null ? (float) acc.yaw.invoke(state) : 0f;
+            if (acc.yawO != null) {
+                float yawODeg = (float) acc.yawO.invoke(state);
+                yawDeg = net.minecraft.util.Mth.rotLerp(partialTick, yawODeg, yawDeg);
+            }
             float rotY = (float)(Math.toRadians(yawDeg) - Math.PI);
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ROTATION_Y, rotY);
 
@@ -655,15 +666,30 @@ public class EntityBatchRenderer {
                     float raw = (float) acc.limbSwingAmt.invoke(state);
                     limbSwingAmt = raw < 0f ? 0f : raw > 1f ? 1f : raw;
                 }
+                
+                // 2. Interpolate Head Yaw & Calculate Relative Angle
                 if (acc.headYaw != null) {
                     float absHeadYaw = (float) acc.headYaw.invoke(state);
+                    if (acc.headYawO != null) {
+                        float absHeadYawO = (float) acc.headYawO.invoke(state);
+                        absHeadYaw = net.minecraft.util.Mth.rotLerp(partialTick, absHeadYawO, absHeadYaw);
+                    }
                     float relDeg = absHeadYaw - yawDeg;
                     while (relDeg >  180f) relDeg -= 360f;
                     while (relDeg < -180f) relDeg += 360f;
                     headYawRel = (float) Math.toRadians(relDeg);
                 }
-                if (acc.headPitch != null)
-                    headPitchRel = (float) Math.toRadians((float) acc.headPitch.invoke(state));
+                
+                // 3. Interpolate Head Pitch
+                if (acc.headPitch != null) {
+                    float pitchDeg = (float) acc.headPitch.invoke(state);
+                    if (acc.headPitchO != null) {
+                        float pitchODeg = (float) acc.headPitchO.invoke(state);
+                        pitchDeg = net.minecraft.util.Mth.lerp(partialTick, pitchODeg, pitchDeg);
+                    }
+                    headPitchRel = (float) Math.toRadians(pitchDeg);
+                }
+
                 if (acc.attackProgress != null) attackProgress = (float) acc.attackProgress.invoke(state);
                 if (acc.swimProgress   != null) swimProgress   = (float) acc.swimProgress.invoke(state);
                 if (acc.sneaking       != null && (boolean) acc.sneaking.invoke(state)) sneakProg = 1f;

@@ -52,34 +52,201 @@ Works standalone. Does not require Nvidium, though both mods are compatible and 
 
 ---
 
-## Known Issues — Will Be Fixed
+# Known Issues & Bug Status
 
-This is a proof of concept release. The following are known and actively being worked on:
+Rentities is currently an **alpha / proof-of-concept** renderer. The core GPU-instanced rendering path is working, but some entity-specific rendering differences remain.
 
-**Armor stand rendering**(FIXED-MAYBE)
-Armor stands always render facing one fixed direction regardless of how they were placed or rotated in the world. Pose data set via `/data` commands (angled arms, bent legs, custom poses) is completely ignored — they always display in the default standing position. This is a known limitation of the current pose extraction system.
+## Bug Status
 
-**Entity facing direction**(PARTIALLY FIXED) - Model baking Y-flip (scale(16, -16, 16)) is handled, but root rotation/yaw handling remains uniform.
-Some entities appear to face the wrong direction compared to where they are actually looking in the world. When you disable Rentities and use vanilla rendering, the same entity may be facing a different direction. This is a yaw/rotation calculation bug being investigated.
+### ✅ Armor stand rendering — FIXED
 
-**Animations are approximate**
-Walk cycles, idle animations, and limb movement work but are not 1:1 with vanilla. Some entities move their limbs in ways that look slightly off compared to the vanilla renderer. Full vanilla animation accuracy is a planned future improvement.
+Armor stands now have their vanilla render state extracted, including individual pose rotations for:
 
-**Texture facing issues**(PARTIALLY FIXED) - Box fallback UVs are fixed, but vanilla model extraction still relies on raw UV captures via EntityMeshCapturingConsumer.
-On some entity types, textures appear mirrored, flipped, or applied to the wrong side of a model part. This is a UV coordinate issue in the mesh extraction pipeline.
+* Head
+* Body
+* Left arm
+* Right arm
+* Left leg
+* Right leg
 
-**Head offset**(substantially fixed; needs entity-by-entity visual testing.) - Shader pivot alignment (translate(0, -1.5, 0)) was adjusted, but hardcoded head offsets remain generalized.
-The head on some entity types appears slightly rotated or offset from where it should be relative to the body.
+Custom poses created with `/data` are now passed to the GPU renderer.
 
-**Unscanned entities show as magenta cubes**(FIXED) - Fallback placeholder meshes and full cache file persistence (saveToCache / loadFromCache) are fully implemented.
-Any entity type that was not present when the mesh cache was built will appear as a spinning magenta placeholder cube. Enable Scan Mode and rejoin a world containing those entities to fix it.
+If an unusual custom armor-stand pose still renders incorrectly, please report the pose and command used.
 
-**No Iris/shader support**
-Entities rendered by Rentities appear unlit and flat when shader mods like Iris are active. Disable Rentities when using shaders for now.
+---
 
-**AMD and Intel GPUs not yet supported**
-The mod detects NVIDIA and disables itself on other vendors. AMD/Intel support is planned.
+### 🟡 Entity facing direction — MOSTLY FIXED
 
+Entity body yaw is now explicitly extracted and converted to the coordinate convention used by the Rentities renderer.
+
+The major global facing-direction problem has been addressed, but individual entity models may still have orientation differences because different vanilla model types use different root/model coordinate conventions.
+
+If an entity faces backwards or sideways compared with vanilla rendering, please report:
+
+* Entity type
+* Entity rotation/yaw
+* Whether the problem occurs at all rotations or only certain rotations
+
+---
+
+### 🟠 Animations — NOT VANILLA-ACCURATE
+
+Rentities performs entity animation in the GPU vertex shader.
+
+Walking, idle movement, limb movement, flying and other animations are implemented procedurally, but they are **not guaranteed to exactly match vanilla Minecraft**.
+
+Known differences may include:
+
+* Walking speed
+* Limb swing timing
+* Idle animations
+* Head movement
+* Flying animations
+* Entity-specific animation timing
+
+**Planned:** extract more of the actual vanilla animation state and reproduce it on the GPU.
+
+---
+
+### 🟠 Texture orientation / UVs — PARTIALLY FIXED
+
+Fallback box UV generation has been corrected, and mesh winding has been improved.
+
+However, vanilla model meshes are still captured from raw vertex UV data. Some model parts can therefore still have:
+
+* Mirrored textures
+* Vertically flipped textures
+* Incorrect face orientation
+* Textures appearing on the wrong side of a model part
+
+This is still an active rendering bug.
+
+**Planned:** preserve vanilla face/UV orientation during mesh extraction instead of relying only on captured vertex UV coordinates.
+
+---
+
+### 🟡 Head and model-part offsets — MOSTLY FIXED
+
+Rentities now records baked model-part pivot information and uses those pivots when applying GPU-side transformations.
+
+This removes the previous reliance on a single generalized head position.
+
+Some entity models may nevertheless still have small differences in:
+
+* Head position
+* Head rotation
+* Model-part pivots
+* Relative body/head alignment
+
+These are expected to require entity-specific testing and fixes.
+
+---
+
+### 🟢 Unscanned entities / magenta cubes — FIXED
+
+Mesh-cache persistence and fallback rendering are implemented.
+
+If an entity was not present when the mesh cache was generated, Rentities may initially display a magenta placeholder cube.
+
+To resolve this:
+
+1. Enable **Entity Scan Mode**.
+2. Enter/reload a world containing the missing entity.
+3. Allow Rentities to capture the entity mesh.
+4. Disable Scan Mode after scanning.
+
+The generated mesh is then stored in the mesh cache.
+
+---
+
+### 🔴 GHAST mesh — BUG
+
+GHAST currently uses:
+
+* 1 body bone
+* 9 tentacle bones
+
+for a total of **10 bones**.
+
+The renderer's bone limit must therefore support at least 10 bones.
+
+If the bone limit is lower than the number of bones used by the GHAST model, tentacle bone indices can exceed the available pivot/animation buffer.
+
+**Status:** code-level bug identified and requires a bone-limit fix.
+
+---
+
+### 🔴 Iris / shader compatibility — NOT SUPPORTED
+
+Rentities currently uses its own entity rendering shader pipeline.
+
+As a result, entities rendered through Rentities may appear:
+
+* Unlit
+* Flat
+* Visually different from vanilla
+* Incorrect when Iris shaders are active
+
+For now, disable Rentities when using shader packs that require Iris entity rendering compatibility.
+
+**Planned:** Iris/shader compatibility.
+
+---
+
+### 🔴 AMD / Intel GPUs — NOT SUPPORTED
+
+Rentities currently restricts itself to NVIDIA GPUs.
+
+AMD and Intel GPU support has not yet been validated and is disabled.
+
+**Planned:** AMD and Intel support after cross-vendor rendering and shader testing.
+
+---
+
+## Current Bug Summary
+
+| Issue                       | Status             |
+| --------------------------- | ------------------ |
+| Armor stand poses           | ✅ Fixed            |
+| Armor stand rotation        | ✅ Fixed            |
+| Entity global yaw           | 🟡 Mostly fixed    |
+| Vanilla-accurate animations | 🟠 Not fixed       |
+| Texture / UV orientation    | 🟠 Partially fixed |
+| Head/model-part offsets     | 🟡 Mostly fixed    |
+| Magenta cache placeholders  | 🟢 Fixed           |
+| GHAST bone limit            | 🔴 Bug identified  |
+| Iris compatibility          | 🔴 Not supported   |
+| AMD GPU support             | 🔴 Not supported   |
+| Intel GPU support           | 🔴 Not supported   |
+
+## Planned
+
+* Complete vanilla-accurate animation reproduction
+* Finish vanilla UV/face-orientation extraction
+* Test and correct remaining entity-specific rotations
+* Finish model-part pivot corrections
+* Fix GHAST 10-bone handling
+* Indirect draw calls with GPU-side frustum culling
+* Reduce/skip vanilla render-state allocation for batched entities
+* Player skin rendering
+* AMD GPU support
+* Intel GPU support
+* Iris compatibility
+
+## Reporting Rendering Bugs
+
+When reporting an entity rendering problem, include:
+
+* Minecraft version
+* Rentities version/commit
+* Sodium version
+* GPU model
+* Entity type
+* Whether the problem occurs with Rentities disabled
+* Screenshot/video if possible
+* Any `/summon` or `/data` command used to reproduce the problem
+
+This makes it much easier to determine whether the issue is caused by mesh baking, UV extraction, entity rotation, animation state, or GPU rendering.
 ---
 
 ## Planned

@@ -159,6 +159,25 @@ The generated mesh is then stored in the mesh cache.
 
 ---
 
+### 🔴 Mob spawner preview rendering — BUG
+
+When looking at a mob spawner, the mob preview inside the spawner can incorrectly be captured and rendered by Rentities as a normal entity.
+
+Symptoms include:
+
+* The preview mob appearing at or around the player's head.
+* The mob being rendered at full size instead of the smaller spawner-preview scale.
+* The mob appearing outside of the spawner.
+* The issue occurring only while looking at or rendering a mob spawner.
+
+This is caused by the spawner's mob preview being rendered using a temporary local `PoseStack` transformation rather than as a normal world entity.
+
+**Planned fix:** detect entity renders originating from block-entity renderers such as mob spawners and either preserve the complete local render transform or bypass Rentities batching for those renders.
+
+**Workaround:** temporarily disable Rentities when inspecting mob spawners.
+
+---
+
 ### 🔴 Iris / shader compatibility — NOT SUPPORTED
 
 Rentities currently uses its own entity rendering shader pipeline.

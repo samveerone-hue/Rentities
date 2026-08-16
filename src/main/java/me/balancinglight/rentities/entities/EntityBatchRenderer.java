@@ -168,13 +168,24 @@ public class EntityBatchRenderer {
 
     public static void prepareForEntityPass() {
         if (INSTANCE == null) return;
+
         if (!INSTANCE.meshBaker.isBaked()) {
-            INSTANCE.meshBaker.bake();
+        INSTANCE.meshBaker.bake();
         }
+
+        /*
+         * EntityMeshBaker collects one pivot vec4 for every
+         * (entityTypeIndex, boneIndex) pair while baking. This works
+         * both for a fresh bake and for meshes loaded from the cache.
+         *
+         * The resulting SSBO is bound at binding 13 during the entity pass.
+         */
+        INSTANCE.meshBaker.uploadPivotSSBO();
+
         INSTANCE.meshBaker.ensureTexturesBootstrapped();
         INSTANCE.passPrepared = true;
     }
-
+    
     public static void flushBatch() {
         if (INSTANCE == null) return;
         INSTANCE.doFlush();

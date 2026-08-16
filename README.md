@@ -159,23 +159,6 @@ The generated mesh is then stored in the mesh cache.
 
 ---
 
-### 🔴 GHAST mesh — BUG
-
-GHAST currently uses:
-
-* 1 body bone
-* 9 tentacle bones
-
-for a total of **10 bones**.
-
-The renderer's bone limit must therefore support at least 10 bones.
-
-If the bone limit is lower than the number of bones used by the GHAST model, tentacle bone indices can exceed the available pivot/animation buffer.
-
-**Status:** code-level bug identified and requires a bone-limit fix.
-
----
-
 ### 🔴 Iris / shader compatibility — NOT SUPPORTED
 
 Rentities currently uses its own entity rendering shader pipeline.
@@ -214,10 +197,38 @@ AMD and Intel GPU support has not yet been validated and is disabled.
 | Texture / UV orientation    | 🟠 Partially fixed |
 | Head/model-part offsets     | 🟡 Mostly fixed    |
 | Magenta cache placeholders  | 🟢 Fixed           |
-| GHAST bone limit            | 🔴 Bug identified  |
 | Iris compatibility          | 🔴 Not supported   |
 | AMD GPU support             | 🔴 Not supported   |
 | Intel GPU support           | 🔴 Not supported   |
+
+## Planned
+
+* Complete vanilla-accurate animation reproduction
+* Finish vanilla UV/face-orientation extraction
+* Test and correct remaining entity-specific rotations
+* Finish model-part pivot corrections
+* Indirect draw calls with GPU-side frustum culling
+* Reduce/skip vanilla render-state allocation for batched entities
+* Player skin rendering
+* AMD GPU support
+* Intel GPU support
+* Iris compatibility
+
+## Reporting Rendering Bugs
+
+When reporting an entity rendering problem, include:
+
+* Minecraft version
+* Rentities version/commit
+* Sodium version
+* GPU model
+* Entity type
+* Whether the problem occurs with Rentities disabled
+* Screenshot/video if possible
+* Any `/summon` or `/data` command used to reproduce the problem
+
+This makes it much easier to determine whether the issue is caused by mesh baking, UV extraction, entity rotation, animation state, or GPU rendering.
+
 
 ## Planned
 

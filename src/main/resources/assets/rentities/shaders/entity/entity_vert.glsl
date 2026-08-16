@@ -33,7 +33,7 @@ struct EntityInstance {
     int   mountEntityID;
     float seatOffsetX, seatOffsetY, seatOffsetZ;
     float texScaleX, texScaleY;
-    float padding1, padding2, padding3, padding4;
+    float headPivotX, headPivotY, headPivotZ, padding4;
 };
 layout(std430, binding = 12) buffer EntityInstanceBuffer { EntityInstance instances[]; };
 
@@ -102,12 +102,13 @@ mat4 scaleMat(vec3 s){return mat4(s.x,0,0,0,0,s.y,0,0,0,0,s.z,0,0,0,0,1);}
 
 // ── Pivot helpers ─────────────────────────────────────────────────────────────
 // ── Bone pivots — hardcoded in shader pixel space (Y-up, feet=0, 1unit=1pixel) ──
-// Verified space: scale(16,-16,16) + translate(0,-1.5,0) applied during bake.
-// arm_l (5/16, 2/16, 0) → (5, 22, 0). head neck → (0, 24, 0). feet → y=0.
-vec3 getP(int cat, int b) {
+vec3 getP(EntityInstance inst, int b) {
+    if (b == BONE_HEAD) return vec3(inst.headPivotX, inst.headPivotY, inst.headPivotZ);
+    
+    int cat = inst.animationCategory;
+
     // BIPED: zombie, skeleton, husk, drowned, villager, pillager, wither skeleton...
     if (cat == ANIM_BIPED || cat == ANIM_GOAT) {
-        if (b == BONE_HEAD)  return vec3( 0.0, 24.0,  0.0);
         if (b == BONE_BODY)  return vec3( 0.0, 24.0,  0.0);
         if (b == BONE_ARM_L) return vec3( 5.0, 22.0,  0.0);
         if (b == BONE_ARM_R) return vec3(-5.0, 22.0,  0.0);
@@ -117,7 +118,6 @@ vec3 getP(int cat, int b) {
     // QUADRUPED: cow, pig, sheep, wolf, fox...
     if (cat == ANIM_QUADRUPED || cat == ANIM_HORSE ||
         cat == ANIM_SNIFFER   || cat == ANIM_ARMADILLO) {
-        if (b == BONE_HEAD)   return vec3( 0.0, 20.0,  8.0);
         if (b == BONE_BODY)   return vec3( 0.0, 20.0,  2.0);
         if (b == BONE_LEG_FL) return vec3(-3.0, 12.0,  7.0);
         if (b == BONE_LEG_FR) return vec3( 3.0, 12.0,  7.0);
@@ -126,7 +126,6 @@ vec3 getP(int cat, int b) {
     }
     // CREEPER: 4 legs
     if (cat == ANIM_CREEPER) {
-        if (b == BONE_HEAD)  return vec3( 0.0, 18.0,  0.0);
         if (b == BONE_BODY)  return vec3( 0.0, 18.0,  0.0);
         if (b == BONE_LEG_L) return vec3( 2.0,  6.0,  4.0);
         if (b == BONE_LEG_R) return vec3(-2.0,  6.0,  4.0);
@@ -135,7 +134,6 @@ vec3 getP(int cat, int b) {
     }
     // BIRD: chicken, parrot
     if (cat == ANIM_BIRD) {
-        if (b == BONE_HEAD)  return vec3( 0.0, 15.0,  0.0);
         if (b == BONE_ARM_L) return vec3( 4.0, 13.0,  0.0);
         if (b == BONE_ARM_R) return vec3(-4.0, 13.0,  0.0);
         if (b == BONE_LEG_L) return vec3( 2.0,  5.0,  0.0);
@@ -143,32 +141,24 @@ vec3 getP(int cat, int b) {
     }
     // STRIDER
     if (cat == ANIM_STRIDER) {
-        if (b == BONE_HEAD)  return vec3( 0.0, 19.0,  0.0);
         if (b == BONE_LEG_L) return vec3( 4.0,  8.0,  0.0);
         if (b == BONE_LEG_R) return vec3(-4.0,  8.0,  0.0);
     }
     // FROG
     if (cat == ANIM_FROG) {
-        if (b == BONE_HEAD)  return vec3( 0.0, 10.0,  1.0);
         if (b == BONE_LEG_L) return vec3( 3.0,  4.0, -3.0);
         if (b == BONE_LEG_R) return vec3(-3.0,  4.0, -3.0);
     }
     // ARTHROPOD: spider
     if (cat == ANIM_ARTHROPOD) {
-        if (b == BONE_HEAD) return vec3( 0.0,  9.0,  4.0);
         if (b == BONE_BODY) return vec3( 0.0,  9.0, -3.0);
         float side = (mod(float(b), 2.0) == 0.0) ? 4.0 : -4.0;
         return vec3(side, 8.0, 3.5 - float(b-2)*1.5);
     }
     // INSECT: bee
     if (cat == ANIM_INSECT) {
-        if (b == BONE_HEAD)  return vec3( 0.0, 10.0,  3.0);
         if (b == BONE_ARM_L) return vec3( 3.0,  9.0,  0.0);
         if (b == BONE_ARM_R) return vec3(-3.0,  9.0,  0.0);
-    }
-    // SHULKER
-    if (cat == ANIM_SHULKER) {
-        if (b == BONE_HEAD) return vec3(0.0, 8.0, 0.0);
     }
     // Default — rotate around origin
     return vec3(0.0);
@@ -181,7 +171,7 @@ mat4 getBipedBone(int b, EntityInstance inst){
     float sw=inst.limbSwing, sa=inst.limbSwingAmount;
     float w1=sa>0.01?sin(sw*0.6662)*1.4*sa:0.0;
     float w2=sa>0.01?sin(sw*0.6662+PI)*1.4*sa:0.0;
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
 
     if(b==BONE_HEAD){
         mat4 r=rotY(inst.headYaw)*rotX(inst.headPitch);
@@ -213,7 +203,7 @@ mat4 getBipedBone(int b, EntityInstance inst){
 // --- QUADRUPED ---
 mat4 getQuadBone(int b, EntityInstance inst){
     float sw=inst.limbSwing, sa=inst.limbSwingAmount;
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
     if(b==BONE_HEAD){
         mat4 r=rotX(inst.headPitch)*rotY(inst.headYaw);
         if(inst.eatProgress>0.0) r=rotX(inst.eatProgress*0.7854)*r;
@@ -233,7 +223,7 @@ mat4 getQuadBone(int b, EntityInstance inst){
 // --- HORSE ---
 mat4 getHorseBone(int b, EntityInstance inst){
     float sw=inst.limbSwing, sa=inst.limbSwingAmount;
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
     if(b==BONE_HEAD){
         float nod=sin(sw*0.8)*sa*0.3;
         mat4 r=rotX(nod+inst.headPitch)*rotY(inst.headYaw);
@@ -254,7 +244,7 @@ mat4 getHorseBone(int b, EntityInstance inst){
 mat4 getBirdBone(int b, EntityInstance inst){
     float t=uGameTime*0.1;
     float sw=inst.limbSwing, sa=inst.limbSwingAmount;
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
     if(b==BONE_HEAD) return pivotRot(p,rotX(sin(sw*0.6662)*sa*0.5+inst.headPitch));
     if(b==BONE_ARM_L){float f=sa<0.01?sin(t*2.0)*0.1:sin(t*5.0)*0.4+0.3; return pivotRot(p,rotZ(-f));}
     if(b==BONE_ARM_R){float f=sa<0.01?sin(t*2.0)*0.1:sin(t*5.0)*0.4+0.3; return pivotRot(p,rotZ(f));}
@@ -267,7 +257,7 @@ mat4 getBirdBone(int b, EntityInstance inst){
 mat4 getArthropodBone(int b, EntityInstance inst){
     float sw=inst.limbSwing, sa=inst.limbSwingAmount;
     float t=uGameTime*0.15;
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
     if(b==BONE_HEAD) return pivotRot(p,rotX(inst.headPitch));
     int pair=b-2;
     float ph=float(pair)*0.7854+(pair%2==0?0.0:PI);
@@ -277,7 +267,7 @@ mat4 getArthropodBone(int b, EntityInstance inst){
 // --- INSECT ---
 mat4 getInsectBone(int b, EntityInstance inst){
     float t=uGameTime*0.1;
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
     if(b==BONE_HEAD) return pivotRot(p,rotX(inst.headPitch*0.5));
     if(b==BONE_ARM_L){float sp=inst.swimProgress>0.0?15.0:8.0; return pivotRot(p,rotY(-sin(t*sp)*0.8)*rotZ(-0.4));}
     if(b==BONE_ARM_R){float sp=inst.swimProgress>0.0?15.0:8.0; return pivotRot(p,rotY(sin(t*sp)*0.8)*rotZ(0.4));}
@@ -298,7 +288,7 @@ mat4 getWormBone(int b, EntityInstance inst){
 // --- FISH ---
 mat4 getFishBone(int b, EntityInstance inst){
     float t=uGameTime*0.1;
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
     mat4 bodyTilt=pivotRot(p,rotY(inst.headYaw*0.3));
     if(b>=1){
         float tailAmp=(1.0-aPosition.z*0.05)*(0.3+inst.limbSwingAmount*0.5);
@@ -313,7 +303,7 @@ mat4 getAquaticLegsBone(int b, EntityInstance inst){
     bool inWater=(inst.flags&FLAG_IN_WATER)!=0;
     float sw=inst.limbSwing, sa=inst.limbSwingAmount;
     float t=uGameTime*0.1;
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
     if(b==BONE_HEAD) return pivotRot(p,rotX(inst.headPitch*0.5));
     if(inWater){
         float tw=sin(aPosition.z*0.3+t*4.0)*sa*0.6;
@@ -346,7 +336,7 @@ mat4 getFloatingBone(int b, EntityInstance inst){
     float t=uGameTime*0.05;
     float bob=sin(t*2.0)*0.5;
     mat4 base=transl(vec3(0,bob,0))*pivotRot(vec3(0),rotZ(sin(t*1.5)*0.1));
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
     if(b>=BONE_ARM_L){
         float side=(b==BONE_ARM_L)?-1.0:1.0;
         return base*pivotRot(p,rotZ(side*sin(uGameTime*0.2*6.0)*0.5));
@@ -381,7 +371,7 @@ mat4 getShulkerBone(int b, EntityInstance inst){
 // --- STRIDER ---
 mat4 getStriderBone(int b, EntityInstance inst){
     float sw=inst.limbSwing, sa=inst.limbSwingAmount;
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
     if(b==BONE_HEAD||b==BONE_BODY) return transl(vec3(sin(sw*0.5)*sa*0.3,0,0));
     if(b==BONE_LEG_L) return pivotRot(p,rotX(sin(sw*0.6662)*sa*1.2));
     if(b==BONE_LEG_R) return pivotRot(p,rotX(sin(sw*0.6662+PI)*sa*1.2));
@@ -392,7 +382,7 @@ mat4 getStriderBone(int b, EntityInstance inst){
 mat4 getFrogBone(int b, EntityInstance inst){
     float sw=inst.limbSwing, sa=inst.limbSwingAmount;
     float crouch=abs(sin(sw*0.4))*sa;
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
     if(b==BONE_HEAD) return pivotRot(p,rotX(inst.headPitch+crouch*0.3));
     if(b==BONE_BODY) return scaleMat(vec3(1.0+crouch*0.15,1.0-crouch*0.2,1.0+crouch*0.15));
     float ph=(b==BONE_LEG_L)?0.0:PI;
@@ -403,7 +393,7 @@ mat4 getFrogBone(int b, EntityInstance inst){
 mat4 getGoatBone(int b, EntityInstance inst){
     mat4 base=getQuadBone(b,inst);
     if(b==BONE_HEAD&&inst.attackProgress>0.0)
-        return pivotRot(getP(inst.animationCategory,b),rotX(inst.attackProgress*1.0472));
+        return pivotRot(getP(inst,b),rotX(inst.attackProgress*1.0472));
     return base;
 }
 
@@ -411,7 +401,7 @@ mat4 getGoatBone(int b, EntityInstance inst){
 mat4 getSnifferBone(int b, EntityInstance inst){
     mat4 base=getQuadBone(b,inst);
     if(b==BONE_HEAD&&inst.eatProgress>0.0)
-        return pivotRot(getP(inst.animationCategory,b),rotX(sin(inst.eatProgress*PI)*1.2));
+        return pivotRot(getP(inst,b),rotX(sin(inst.eatProgress*PI)*1.2));
     return base;
 }
 
@@ -432,7 +422,7 @@ mat4 getArmadilloBone(int b, EntityInstance inst){
 mat4 getCreeperBone(int b, EntityInstance inst){
     float sw=inst.limbSwing, sa=inst.limbSwingAmount;
     float swell=inst.swellAmount;
-    vec3 p=getP(inst.animationCategory,b);
+    vec3 p=getP(inst,b);
     if(b==BONE_HEAD){
         if(swell>0.0){float ss=1.0+swell*0.2; return transl(p)*scaleMat(vec3(ss))*transl(-p);}
         return mat4(1.0);

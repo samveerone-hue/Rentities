@@ -1,5 +1,6 @@
 package me.balancinglight.rentities.entities;
 
+import me.balancinglight.rentities.Rentities;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.entity.ArmorStandRenderer;
 import net.minecraft.client.renderer.entity.EntityRenderer;

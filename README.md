@@ -68,7 +68,7 @@ Walk cycles, idle animations, and limb movement work but are not 1:1 with vanill
 **Texture facing issues**(PARTIALLY FIXED) - Box fallback UVs are fixed, but vanilla model extraction still relies on raw UV captures via EntityMeshCapturingConsumer.
 On some entity types, textures appear mirrored, flipped, or applied to the wrong side of a model part. This is a UV coordinate issue in the mesh extraction pipeline.
 
-**Head offset**(PARTIALLY FIXED) - Shader pivot alignment (translate(0, -1.5, 0)) was adjusted, but hardcoded head offsets remain generalized.
+**Head offset**(substantially fixed; needs entity-by-entity visual testing.) - Shader pivot alignment (translate(0, -1.5, 0)) was adjusted, but hardcoded head offsets remain generalized.
 The head on some entity types appears slightly rotated or offset from where it should be relative to the body.
 
 **Unscanned entities show as magenta cubes**(FIXED) - Fallback placeholder meshes and full cache file persistence (saveToCache / loadFromCache) are fully implemented.

@@ -44,9 +44,6 @@ public class EntityBatchRenderer {
 
     // Stored VP matrix from terrain render pass
     public static org.joml.Matrix4f storedViewProjection;
-
-    private static final int SSBO_BINDING = 12;
-private static final int PIVOT_SSBO_BINDING = 13;
     private boolean textureCacheLoaded = false;
     private boolean passPrepared = false;
     private int lastBoundGlTexId = 0;

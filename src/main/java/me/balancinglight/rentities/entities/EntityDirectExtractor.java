@@ -44,14 +44,33 @@ public final class EntityDirectExtractor {
     public static final net.minecraft.client.renderer.entity.state.EntityRenderState SENTINEL =
             new net.minecraft.client.renderer.entity.state.EntityRenderState();
 
-    private EntityDirectExtractor() {}
+    /**
+     * Prevents entities rendered as part of special renderers, such as mob-spawner
+     * previews, from being captured by Rentities.
+     *
+     * ThreadLocal is used because rendering happens on the client render thread and
+     * the guard must not leak between unrelated rendering operations.
+     */
+    private static final ThreadLocal<Boolean> SKIP_BATCHING =
+            ThreadLocal.withInitial(() -> false);
 
+    public static void setSkipBatching(boolean skip) {
+        SKIP_BATCHING.set(skip);
+    }
+
+    public static boolean isSkippingBatching() {
+        return SKIP_BATCHING.get();
+    }
+
+    private EntityDirectExtractor() {}
     /**
      * Writes {@code entity} into the batch queue if it can be GPU-instanced.
      *
      * @return true if the entity was queued and vanilla extraction must be skipped
      */
     public static boolean tryExtract(Entity entity, float partialTick) {
+        if (isSkippingBatching()) return false;
+
         EntityBatchRenderer renderer = EntityBatchRenderer.INSTANCE;
         if (renderer == null || entity == null) return false;
 

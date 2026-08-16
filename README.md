@@ -226,35 +226,6 @@ AMD and Intel GPU support has not yet been validated and is disabled.
 * Finish vanilla UV/face-orientation extraction
 * Test and correct remaining entity-specific rotations
 * Finish model-part pivot corrections
-* Indirect draw calls with GPU-side frustum culling
-* Reduce/skip vanilla render-state allocation for batched entities
-* Player skin rendering
-* AMD GPU support
-* Intel GPU support
-* Iris compatibility
-
-## Reporting Rendering Bugs
-
-When reporting an entity rendering problem, include:
-
-* Minecraft version
-* Rentities version/commit
-* Sodium version
-* GPU model
-* Entity type
-* Whether the problem occurs with Rentities disabled
-* Screenshot/video if possible
-* Any `/summon` or `/data` command used to reproduce the problem
-
-This makes it much easier to determine whether the issue is caused by mesh baking, UV extraction, entity rotation, animation state, or GPU rendering.
-
-
-## Planned
-
-* Complete vanilla-accurate animation reproduction
-* Finish vanilla UV/face-orientation extraction
-* Test and correct remaining entity-specific rotations
-* Finish model-part pivot corrections
 * Fix GHAST 10-bone handling
 * Indirect draw calls with GPU-side frustum culling
 * Reduce/skip vanilla render-state allocation for batched entities

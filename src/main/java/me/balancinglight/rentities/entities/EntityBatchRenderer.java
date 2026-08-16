@@ -246,8 +246,32 @@ public class EntityBatchRenderer {
             glUniform1f(uGameTime, gameTime);
 
             // Bind SSBOs
-            glBindBufferRange(GL_SHADER_STORAGE_BUFFER, SSBO_BINDING, instanceRing.id(),
-                    instanceRing.offsetOf(bufIdx), instanceRing.slotSize());
+        glBindBufferRange(
+                GL_SHADER_STORAGE_BUFFER,
+                SSBO_BINDING,
+                instanceRing.id(),
+                instanceRing.offsetOf(bufIdx),
+                instanceRing.slotSize());
+
+        /*
+         * Static per-entity-type/per-bone pivot table.
+         *
+         * Layout:
+         *   pivotIndex = entityTypeIndex * EntityMeshBaker.MAX_BONES + boneIndex
+         *   vec4       = (x, y, z, padding)
+         *
+         * The vertex shader reads this at binding 13.
+         */
+        int pivotSSBO = meshBaker.getPivotSSBOId();
+        if (pivotSSBO != 0) {
+            glBindBufferBase(
+                    GL_SHADER_STORAGE_BUFFER,
+                    PIVOT_SSBO_BINDING,
+                    pivotSSBO);
+        } else if (Rentities.IS_DEBUG) {
+            Rentities.LOGGER.warn(
+                    "Entity pivot SSBO is not available; using zero pivots");
+        }
 
             if (Rentities.config.entity_batching_debug && count > 0 && (System.currentTimeMillis() % 2000 < 50)) {
                  float px = MemoryUtil.memGetFloat(slotAddr + EntityInstance.OFFSET_POSITION_X);

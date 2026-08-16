@@ -5,7 +5,8 @@
   "refmap": "rentities.refmap.json",
   "client": [
     "minecraft.MixinEntityRenderDispatcher",
-    "minecraft.MixinLevelRenderer"
+    "minecraft.MixinLevelRenderer",
+    "minecraft.MixinBlockEntityRenderDispatcher"
   ],
   "injectors": {
     "defaultRequire": 1

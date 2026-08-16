@@ -213,7 +213,7 @@ mat4 scaleMat(vec3 s) {
  * coordinates instead of hardcoding humanoid geometry in the shader.
  */
 vec3 getP(EntityInstance inst, int boneIndex) {
-    const int MAX_BONES = 8;
+    const int MAX_BONES = 10;
 
     int pivotIndex =
         inst.entityTypeIndex * MAX_BONES + boneIndex;

@@ -27,6 +27,7 @@ public abstract class MixinEntityRenderDispatcher {
             CallbackInfo ci) {
 
         if (!Rentities.IS_ENABLED) return;
+        if (EntityDirectExtractor.isSkippingBatching()) return;
         if (state == null) return;
 
         // Already queued by the direct extraction hook — nothing was ever populated on this

@@ -26,6 +26,7 @@ import static org.lwjgl.opengl.GL20C.glUniformMatrix4fv;
 import static org.lwjgl.opengl.GL20C.glUseProgram;
 import static org.lwjgl.opengl.GL30C.glBindVertexArray;
 import static org.lwjgl.opengl.GL30C.glBindBufferRange;
+import static org.lwjgl.opengl.GL30C.glBindBufferBase;
 import static org.lwjgl.opengl.GL43C.glMultiDrawElementsIndirect;
 import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER;
 import static org.lwjgl.opengl.GL31C.glDrawElementsInstanced;
@@ -45,6 +46,7 @@ public class EntityBatchRenderer {
     public static org.joml.Matrix4f storedViewProjection;
 
     private static final int SSBO_BINDING = 12;
+private static final int PIVOT_SSBO_BINDING = 13;
     private boolean textureCacheLoaded = false;
     private boolean passPrepared = false;
     private int lastBoundGlTexId = 0;

@@ -56,7 +56,7 @@ Works standalone. Does not require Nvidium, though both mods are compatible and 
 
 This is a proof of concept release. The following are known and actively being worked on:
 
-**Armor stand rendering**
+**Armor stand rendering**(FIXED-MAYBE)
 Armor stands always render facing one fixed direction regardless of how they were placed or rotated in the world. Pose data set via `/data` commands (angled arms, bent legs, custom poses) is completely ignored — they always display in the default standing position. This is a known limitation of the current pose extraction system.
 
 **Entity facing direction**(PARTIALLY FIXED) - Model baking Y-flip (scale(16, -16, 16)) is handled, but root rotation/yaw handling remains uniform.

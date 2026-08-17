@@ -165,16 +165,36 @@ public class EntityBatchRenderer {
         return extractionBuffer + (long) idx * EntityInstance.STRIDE;
     }
 
-    public static void queueEntityState(Object state, double x, double y, double z) {
-        if (INSTANCE == null) return;
+    public static boolean queueEntityState(Object state, double x, double y, double z) {
+        if (INSTANCE == null) return false;
+
         int idx = queueSize.getAndIncrement();
-        if (idx < MAX_QUEUE) {
-            EntityType<?> type = getEntityType(state);
-            queuedTypes[idx] = type;
-            extractionTypes[idx] = type;
-            queuedOriginalIndices[idx] = idx;
-            INSTANCE.writeEntityInstance(extractionBuffer + (long)idx * EntityInstance.STRIDE, state, x, y, z);
+
+        if (idx >= MAX_QUEUE) {
+            queueSize.decrementAndGet();
+
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.warn(
+                        "[Rentities] Instance queue full ({}); falling back to vanilla rendering",
+                        MAX_QUEUE);
+            }
+
+            return false;
         }
+
+        EntityType<?> type = getEntityType(state);
+        queuedTypes[idx] = type;
+        extractionTypes[idx] = type;
+        queuedOriginalIndices[idx] = idx;
+
+        INSTANCE.writeEntityInstance(
+                extractionBuffer + (long) idx * EntityInstance.STRIDE,
+                state,
+                x,
+                y,
+                z);
+
+        return true;
     }
 
     public static void beginWorldRender(Matrix4f positionMatrix, Matrix4f projectionMatrix) {
@@ -744,8 +764,6 @@ public class EntityBatchRenderer {
                                     bindTextureUnit0(id);
                                     return true;
                                 }
-+++++++
- REPLACE
                             }
                         }
                     }
@@ -911,20 +929,38 @@ public class EntityBatchRenderer {
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_TEX_SCALE_X,   1f);
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_TEX_SCALE_Y,   1f);
 
-        } catch (Throwable e) {
-            MemoryUtil.memSet(ptr, 0, EntityInstance.STRIDE);
+        } catch (Exception e) {
+        if (Rentities.IS_DEBUG) {
+            Rentities.LOGGER.warn(
+                    "[Rentities] Failed to extract entity instance data for {}",
+                    state != null ? state.getClass().getName() : "null",
+                    e);
         }
+
+        MemoryUtil.memSet(ptr, 0, EntityInstance.STRIDE);
+    }
+        
     }
 
     @SuppressWarnings("unchecked")
     public static EntityType<?> getEntityType(Object state) {
         if (state == null) return null;
+
         StateAccessor acc = ACCESSOR_CACHE.get(state.getClass());
+    
         if (acc.type != null) {
             try {
                 return (EntityType<?>) acc.type.invoke(state);
-            } catch (Throwable ignored) {}
+            } catch (Exception e) {
+                if (Rentities.IS_DEBUG) {
+                    Rentities.LOGGER.warn(
+                            "[Rentities] Failed to resolve EntityType from {}",
+                            state.getClass().getName(),
+                            e);
+                }
+             }
         }
+
         return null;
     }
 

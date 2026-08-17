@@ -91,6 +91,22 @@ public final class EntityDirectExtractor {
         if (!renderer.hasMeshFor(type)) return false;
         if (!renderer.entityTextureLocs.containsKey(type)) return false;
 
+        /*
+         * The current GPU mesh path deliberately bakes only the entity itself.
+         * It does not render vanilla item/armor model layers. Equipment is still
+         * extracted into the instance payload for future support, but using those
+         * IDs without a matching item-model renderer makes equipped mobs appear
+         * naked / empty-handed. Let vanilla render any equipped LivingEntity until
+         * the item-model layer is actually implemented.
+         *
+         * This is also important for enchanted armor, shields, bows, tools, and
+         * custom item models: vanilla must own those layers rather than silently
+         * dropping them.
+         */
+        if (entity instanceof LivingEntity living && hasRenderableEquipment(living)) {
+            return false;
+        }
+
         long ptr = EntityBatchRenderer.reserveInstance(type);
         if (ptr == 0L) return false;
 
@@ -552,6 +568,15 @@ public final class EntityDirectExtractor {
      * deliberately fall back to the existing sentinel values instead of inventing arbitrary
      * render IDs.
      */
+    private static boolean hasRenderableEquipment(LivingEntity living) {
+        return !living.getItemBySlot(EquipmentSlot.MAINHAND).isEmpty()
+                || !living.getItemBySlot(EquipmentSlot.OFFHAND).isEmpty()
+                || !living.getItemBySlot(EquipmentSlot.HEAD).isEmpty()
+                || !living.getItemBySlot(EquipmentSlot.CHEST).isEmpty()
+                || !living.getItemBySlot(EquipmentSlot.LEGS).isEmpty()
+                || !living.getItemBySlot(EquipmentSlot.FEET).isEmpty();
+    }
+
     private static int itemId(ItemStack stack) {
         if (stack == null || stack.isEmpty()) {
             return EntityInstance.NO_ITEM;

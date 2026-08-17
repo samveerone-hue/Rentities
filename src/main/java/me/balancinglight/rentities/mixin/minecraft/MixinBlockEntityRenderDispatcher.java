@@ -17,7 +17,9 @@ public abstract class MixinBlockEntityRenderDispatcher {
      * that should be submitted to Rentities as a normal GPU instance.
      *
      * Disable Rentities batching for the entire block-entity submission
-     * so nested entity renders fall back to vanilla rendering.
+     * so nested entity renders fall back to vanilla rendering. In modern
+     * mappings method_3555 is BlockEntityRenderDispatcher#render, which is the
+     * correct outer boundary for mob-spawner previews.
      */
     @Inject(
             method = "method_3555",

@@ -64,8 +64,15 @@ public class EntityErrorRenderer {
         vboId = glCreateBuffers();
         eboId = glCreateBuffers();
 
-        glNamedBufferData(vboId, toFloatBuffer(CUBE_VERTS), GL_STATIC_DRAW);
-        glNamedBufferData(eboId, toIntBuffer(CUBE_INDICES),  GL_STATIC_DRAW);
+        java.nio.FloatBuffer vertexBuffer = toFloatBuffer(CUBE_VERTS);
+        java.nio.IntBuffer indexBuffer = toIntBuffer(CUBE_INDICES);
+        try {
+            glNamedBufferData(vboId, vertexBuffer, GL_STATIC_DRAW);
+            glNamedBufferData(eboId, indexBuffer, GL_STATIC_DRAW);
+        } finally {
+            MemoryUtil.memFree(vertexBuffer);
+            MemoryUtil.memFree(indexBuffer);
+        }
 
         glVertexArrayVertexBuffer(vaoId, 0, vboId, 0, 3 * 4);
         glVertexArrayElementBuffer(vaoId, eboId);
@@ -172,12 +179,16 @@ public class EntityErrorRenderer {
     }
 
     public void delete() {
-        glDeleteVertexArrays(vaoId);
-        glDeleteBuffers(vboId);
-        glDeleteBuffers(eboId);
-        glUnmapNamedBuffer(errorSsboId);
-        glDeleteBuffers(errorSsboId);
+        if (vaoId != 0) glDeleteVertexArrays(vaoId);
+        if (vboId != 0) glDeleteBuffers(vboId);
+        if (eboId != 0) glDeleteBuffers(eboId);
+        if (errorSsboId != 0) {
+            glUnmapNamedBuffer(errorSsboId);
+            glDeleteBuffers(errorSsboId);
+        }
         if (errorShaderProgram != 0) glDeleteProgram(errorShaderProgram);
+        vaoId = vboId = eboId = errorSsboId = errorShaderProgram = 0;
+        errorSsboAddr = 0L;
     }
 
     private static String loadShaderSource(String path) {

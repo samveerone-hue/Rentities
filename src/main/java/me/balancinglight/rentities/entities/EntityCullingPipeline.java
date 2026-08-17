@@ -36,6 +36,7 @@ import static org.lwjgl.opengl.GL45C.glBindBufferRange;
  *   binding 14  draw groups        host-written, ring-buffered
  *   binding 15  indirect commands  host-written template, GPU-incremented instanceCount
  *   binding 16  visible indices    device-local, GPU-written, read by the vertex shader
+ *   binding 17  fast animation      device-local, GPU-written, read by the vertex shader
  * </pre>
  */
 public final class EntityCullingPipeline {
@@ -43,6 +44,7 @@ public final class EntityCullingPipeline {
     public static final int GROUP_SSBO_BINDING   = 14;
     public static final int CMD_SSBO_BINDING     = 15;
     public static final int VISIBLE_SSBO_BINDING = 16;
+    public static final int FAST_ANIMATION_SSBO_BINDING = 17;
 
     /** Bytes per DrawElementsIndirectCommand — five uints, and the MDI stride. */
     public static final int CMD_STRIDE = 20;
@@ -60,6 +62,7 @@ public final class EntityCullingPipeline {
     private final GpuRingBuffer groupBuffer;
     private final GpuRingBuffer cmdBuffer;
     private final GpuRingBuffer visibleBuffer;
+    private final GpuRingBuffer fastAnimationBuffer;
 
     private GlShader cullShader;
     private int uFrustumPlanes = -1;
@@ -78,6 +81,7 @@ public final class EntityCullingPipeline {
         this.groupBuffer   = new GpuRingBuffer((long) MAX_GROUPS * GROUP_STRIDE, slots, true);
         this.cmdBuffer     = new GpuRingBuffer((long) MAX_GROUPS * CMD_STRIDE, slots, true);
         this.visibleBuffer = new GpuRingBuffer((long) maxInstances * 4, slots, false);
+        this.fastAnimationBuffer = new GpuRingBuffer((long) maxInstances * 16, slots, false);
         compile();
     }
 
@@ -174,6 +178,7 @@ public final class EntityCullingPipeline {
         bindSsbo(GROUP_SSBO_BINDING, groupBuffer);
         bindSsbo(CMD_SSBO_BINDING, cmdBuffer);
         bindSsbo(VISIBLE_SSBO_BINDING, visibleBuffer);
+        bindSsbo(FAST_ANIMATION_SSBO_BINDING, fastAnimationBuffer);
 
         glDispatchCompute((instanceCount + LOCAL_SIZE - 1) / LOCAL_SIZE, 1, 1);
 
@@ -182,7 +187,7 @@ public final class EntityCullingPipeline {
         glMemoryBarrier(GL_COMMAND_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
     }
 
-    /** Binds the command buffer for indirect draws; the visible index SSBO stays bound. */
+    /** Binds the command buffer for indirect draws; the visible-index and fast-animation SSBOs stay bound. */
     public void bindForDraw() {
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, cmdBuffer.id());
     }
@@ -202,6 +207,7 @@ public final class EntityCullingPipeline {
         groupBuffer.delete();
         cmdBuffer.delete();
         visibleBuffer.delete();
+        fastAnimationBuffer.delete();
         MemoryUtil.memFree(planeBuffer);
     }
 }

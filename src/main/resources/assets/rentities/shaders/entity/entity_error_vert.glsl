@@ -12,7 +12,7 @@ struct EntityInstance {
     int   flags;
     float riptideProgress, sitProgress, eatProgress, swellAmount;
     float explodeProgress, rollProgress;
-    int   entityTypeIndex, animationCategory, textureArrayLayer;
+    int   entityTypeIndex, animationCategory, groupIndex;
     int   heldItemMain, heldItemOffhand;
     int   armorHead, armorChest, armorLegs, armorFeet;
     int   mountEntityID;

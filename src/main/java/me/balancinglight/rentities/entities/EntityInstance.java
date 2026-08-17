@@ -38,9 +38,8 @@ public final class EntityInstance {
 
     public static final int OFFSET_ENTITY_TYPE      = 84;
     public static final int OFFSET_ANIM_CATEGORY    = 88;
-    public static final int OFFSET_TEXTURE_LAYER    = 92;
-    /** Draw-group index for GPU culling. Reuses the existing texture-layer slot until material layers are introduced. */
-    public static final int OFFSET_GROUP_INDEX       = 92;
+    /** Draw-group index for GPU culling. */
+    public static final int OFFSET_GROUP_INDEX      = 92;
 
     public static final int OFFSET_HELD_MAIN        = 96;
     public static final int OFFSET_HELD_OFFHAND     = 100;

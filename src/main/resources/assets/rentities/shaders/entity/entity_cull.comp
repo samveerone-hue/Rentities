@@ -18,6 +18,7 @@ layout(local_size_x = 128) in;
 #define FIELD_POS_X     0
 #define FIELD_POS_Y     1
 #define FIELD_POS_Z     2
+#define FIELD_LIMB_SWING 4
 #define FIELD_FLAGS     14   // EntityInstance.OFFSET_FLAGS / 4
 #define FIELD_GROUP_INDEX 23 // EntityInstance.OFFSET_GROUP_INDEX / 4
 #define FLAG_IS_INVISIBLE 64
@@ -45,6 +46,14 @@ layout(std430, binding = 15) buffer DrawCommandBuffer { DrawElementsIndirectComm
 // Compacted instance indices. Slot g of this buffer starts at groups[g].firstInstance, so
 // no prefix sum is needed: worst case (nothing culled) each group fits in its own range.
 layout(std430, binding = 16) writeonly buffer VisibleIndexBuffer { uint visibleIndices[]; };
+
+// Per-instance animation phases generated once by the cull pass and reused by every
+// vertex of the surviving entity. x/y = sin/cos(limbSwing * 0.6662),
+// z/w = sin/cos(limbSwing * 0.8). This keeps the hot vertex shader from recomputing
+// the same walk-cycle trigonometry dozens of times per entity.
+layout(std430, binding = 17) writeonly buffer FastAnimationFrameBuffer {
+    vec4 fastAnimationFrames[];
+};
 
 // Camera-relative frustum planes (xyz = normal, w = distance), same space as the instance
 // positions, so no per-entity world transform is needed here.
@@ -82,6 +91,13 @@ void main() {
                        rawInstances[base + uint(FIELD_POS_Z)]);
 
     if (!insideFrustum(centre, group.boundsRadius)) return;
+
+    float limbSwing = rawInstances[base + uint(FIELD_LIMB_SWING)];
+    float walk0662 = limbSwing * 0.6662;
+    float walk08   = limbSwing * 0.8;
+    fastAnimationFrames[instanceIndex] = vec4(
+        sin(walk0662), cos(walk0662),
+        sin(walk08),   cos(walk08));
 
     uint slot = atomicAdd(cmds[g].instanceCount, 1u);
     visibleIndices[group.firstInstance + slot] = instanceIndex;

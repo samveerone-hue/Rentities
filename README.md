@@ -66,6 +66,14 @@ When reporting an entity rendering problem, include:
 This makes it much easier to determine whether the issue is caused by mesh baking, UV extraction, entity rotation, animation state, or GPU rendering.
 ---
 
+## Implemented in this revision
+
+- Safe per-location GPU texture-ID caching with reload invalidation
+- Player skin texture batching for standard/wide player models
+- Per-texture draw grouping so different player skins do not overwrite each other
+- Dynamic mesh extraction for newly encountered supported entity types
+- GPU frustum culling + indirect draw-command generation
+
 ## Planned
 
 - Fix armor stand pose reading
@@ -74,7 +82,7 @@ This makes it much easier to determine whether the issue is caused by mesh bakin
 - Fix texture UV orientation issues
 - Indirect draw calls with GPU-side frustum culling
 - Skip vanilla render state allocation for batched entities entirely
-- Player skin rendering
+- Player skin rendering (wide/default player model; slim/Alex stays on vanilla to preserve arm geometry)
 - AMD and Intel support
 - Iris compatibility
 

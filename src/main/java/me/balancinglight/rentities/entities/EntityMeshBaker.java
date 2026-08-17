@@ -240,7 +240,9 @@ public class EntityMeshBaker {
 
                 float[] vertices = null;
                 try {
-                    var renderer = rendererMap.get(type);
+                    var renderer = type == EntityType.PLAYER
+                            ? getWidePlayerRenderer(dispatcher)
+                            : rendererMap.get(type);
                     if (renderer instanceof LivingEntityRenderer livingRenderer) {
                         vertices = extractFromLivingRenderer(
                                 livingRenderer,
@@ -281,7 +283,6 @@ public class EntityMeshBaker {
             uploadToGPU(allVertices, allIndices, vertexCount, indexCount);
             uploadPivotSSBO();
             bootstrapTextures(dispatcher, rendererMap);
-            pendingTextureSave = true;
             currentBakingTypeIdx = -1;
 
             saveToCache();
@@ -293,14 +294,39 @@ public class EntityMeshBaker {
         }
     }
 
-    /** Set to true after bake to request a texture cache save from EntityBatchRenderer. */
-    public volatile boolean pendingTextureSave = false;
-
     @SuppressWarnings("rawtypes")
     public void ensureTexturesBootstrapped() {
         if (texturesBootstrapped) return;
         bootstrapTextures(Minecraft.getInstance().getEntityRenderDispatcher());
         texturesBootstrapped = true;
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static net.minecraft.client.renderer.entity.EntityRenderer<?, ?> getWidePlayerRenderer(
+            net.minecraft.client.renderer.entity.EntityRenderDispatcher dispatcher) {
+        if (dispatcher == null) return null;
+        try {
+            Field f = net.minecraft.client.renderer.entity.EntityRenderDispatcher.class.getDeclaredField("field_4687");
+            f.setAccessible(true);
+            Object mapObj = f.get(dispatcher);
+            if (!(mapObj instanceof Map<?, ?> map)) return null;
+            Object fallback = null;
+            for (Map.Entry<?, ?> e : map.entrySet()) {
+                Object renderer = e.getValue();
+                if (!(renderer instanceof net.minecraft.client.renderer.entity.EntityRenderer<?, ?>)) continue;
+                if (fallback == null) fallback = renderer;
+                String key = String.valueOf(e.getKey()).toLowerCase(java.util.Locale.ROOT);
+                if (key.contains("wide") || key.contains("default")) {
+                    return (net.minecraft.client.renderer.entity.EntityRenderer<?, ?>) renderer;
+                }
+            }
+            return (net.minecraft.client.renderer.entity.EntityRenderer<?, ?>) fallback;
+        } catch (Throwable t) {
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.warn("Failed to access player renderer map: {}", t.getMessage());
+            }
+            return null;
+        }
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
@@ -881,7 +907,9 @@ public class EntityMeshBaker {
             return MeshStatus.UNKNOWN;
         }
 
-        var renderer = rendererMap.get(type);
+        var renderer = type == EntityType.PLAYER
+                ? getWidePlayerRenderer(dispatcher)
+                : rendererMap.get(type);
         if (!(renderer instanceof LivingEntityRenderer livingRenderer)) {
             // This is not a permanent failure. A renderer may be initialized later,
             // and generic renderer adapters can be added without poisoning this type.
@@ -1018,7 +1046,7 @@ public class EntityMeshBaker {
     public int getPivotSSBOId() { return pivotSSBOId; }
 
     private static final int CACHE_MAGIC   = 0xECAC1021;
-    private static final int CACHE_VERSION = 4;
+    private static final int CACHE_VERSION = 5;
 
     /** Cache file location: .minecraft/rentities_entity_mesh_cache.bin */
     private static java.io.File cacheFile = null;
@@ -1121,88 +1149,133 @@ public class EntityMeshBaker {
         java.io.File f = getCacheFile();
         if (!f.exists()) return false;
 
-        cpuMeshes.clear();
-        meshInfoMap.clear();
-        meshStatus.clear();
+        final long MAX_CACHE_BYTES = 512L * 1024L * 1024L;
+        final int MAX_TYPES = Math.max(EntityBatchRegistry.REGISTRY_TYPES().size(), INITIAL_ENTITY_TYPE_CAPACITY);
+        final int MAX_ID_BYTES = 512;
+        if (f.length() <= 0 || f.length() > MAX_CACHE_BYTES) {
+            Rentities.LOGGER.warn("[EntityCache] Refusing cache with invalid size: {} bytes", f.length());
+            return false;
+        }
+
+        Map<EntityType<?>, CpuMesh> loadedCpuMeshes = new LinkedHashMap<>();
+        Map<EntityType<?>, MeshInfo> loadedMeshInfo = new HashMap<>();
+        Map<EntityType<?>, MeshStatus> loadedStatuses = new HashMap<>();
+        List<float[]> allVertices = new ArrayList<>();
+        List<int[]> allIndices = new ArrayList<>();
+        int totalVertexCount = 0;
+        int totalIndexCount = 0;
 
         try (java.io.DataInputStream in = new java.io.DataInputStream(
                 new java.io.BufferedInputStream(new java.io.FileInputStream(f)))) {
 
-            if (in.readInt() != CACHE_MAGIC)   { Rentities.LOGGER.warn("[EntityCache] Bad magic"); return false; }
-            if (in.readInt() != CACHE_VERSION)  { Rentities.LOGGER.warn("[EntityCache] Version mismatch"); return false; }
+            if (in.readInt() != CACHE_MAGIC) {
+                Rentities.LOGGER.warn("[EntityCache] Bad magic");
+                return false;
+            }
+            if (in.readInt() != CACHE_VERSION) {
+                Rentities.LOGGER.warn("[EntityCache] Version mismatch");
+                return false;
+            }
 
             int typeCount = in.readInt();
-            List<float[]> allVertices = new ArrayList<>(typeCount);
-            List<int[]>   allIndices  = new ArrayList<>(typeCount);
+            if (typeCount < 0 || typeCount > MAX_TYPES) {
+                throw new java.io.IOException("Invalid entity type count: " + typeCount);
+            }
 
             Map<String, EntityType<?>> typesById = new HashMap<>();
             for (EntityType<?> candidate : EntityBatchRegistry.REGISTRY_TYPES()) {
                 Object key = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(candidate);
                 if (key != null) typesById.put(key.toString(), candidate);
             }
-            int totalVertexCount = 0, totalIndexCount = 0;
 
             for (int i = 0; i < typeCount; i++) {
-                // Type ID
                 int idLen = in.readInt();
+                if (idLen <= 0 || idLen > MAX_ID_BYTES) {
+                    throw new java.io.IOException("Invalid entity id length: " + idLen);
+                }
                 byte[] idBytes = new byte[idLen];
                 in.readFully(idBytes);
                 String id = new String(idBytes, java.nio.charset.StandardCharsets.UTF_8);
-                // Find entity type by matching the saved ID string against all known types.
-                // Avoids ResourceLocation/reflection issues — same iteration used in bake().
-                EntityType<?> type = typesById.get(id);
-                if (type == null) {
-                    Rentities.LOGGER.warn("[EntityCache] Unknown entity type: {}, skipping", id);
-                    // Still need to read past the data
-                    int vLen = in.readInt(); for (int j=0;j<vLen;j++) in.readFloat();
-                    int iLen = in.readInt(); for (int j=0;j<iLen;j++) in.readInt();
-                    in.readInt(); in.readInt(); in.readInt(); // meshInfo
-                    continue;
-                }
 
-                // Vertices
                 int vLen = in.readInt();
+                if (vLen < 0 || (vLen % 9) != 0 || vLen > 40_000_000) {
+                    throw new java.io.IOException("Invalid vertex float count for " + id + ": " + vLen);
+                }
                 float[] verts = new float[vLen];
                 for (int j = 0; j < vLen; j++) verts[j] = in.readFloat();
 
-                // Indices
                 int iLen = in.readInt();
+                if (iLen < 0 || iLen > 120_000_000) {
+                    throw new java.io.IOException("Invalid index count for " + id + ": " + iLen);
+                }
                 int[] inds = new int[iLen];
-                for (int j = 0; j < iLen; j++) inds[j] = in.readInt();
-                cpuMeshes.put(type, new CpuMesh(verts, inds));
-                meshStatus.put(type, MeshStatus.READY);
+                for (int j = 0; j < iLen; j++) {
+                    int idx = in.readInt();
+                    if (idx < 0 || idx >= vLen / 9) {
+                        throw new java.io.IOException("Invalid local index " + idx + " for " + id);
+                    }
+                    inds[j] = idx;
+                }
 
-                // Mesh info in the cache contains global byte offsets. The authoritative
-                // CPU mesh map stores local indices so rebuilding can safely rebase once.
                 int vOffset = in.readInt();
                 int iOffset = in.readInt();
-                int iCount  = in.readInt();
-                int baseVertex = vOffset / VERTEX_STRIDE;
-                for (int j = 0; j < inds.length; j++) {
-                    inds[j] -= baseVertex;
+                int cachedICount = in.readInt();
+                if (vOffset < 0 || iOffset < 0 || cachedICount != iLen) {
+                    throw new java.io.IOException("Invalid mesh metadata for " + id);
                 }
 
-                meshInfoMap.put(type, new MeshInfo(vOffset, iOffset, iCount));
+                EntityType<?> type = typesById.get(id);
+                if (type == null) {
+                    continue;
+                }
 
+                loadedCpuMeshes.put(type, new CpuMesh(verts, Arrays.copyOf(inds, inds.length)));
+                loadedStatuses.put(type, MeshStatus.READY);
+                // Recompute global offsets from the meshes actually loaded. Cache entries
+                // for removed entity types are skipped, so their old offsets must not leak
+                // into the rebuilt VBO/EBO layout.
+                int rebuiltVOffset = totalVertexCount * VERTEX_STRIDE;
+                int rebuiltIOffset = totalIndexCount * 4;
+                if (rebuiltVOffset < 0 || rebuiltIOffset < 0) {
+                    throw new java.io.IOException("Rebuilt mesh offset overflow for " + id);
+                }
+                loadedMeshInfo.put(type, new MeshInfo(rebuiltVOffset, rebuiltIOffset, cachedICount));
+
+                int[] rebased = Arrays.copyOf(inds, inds.length);
+                for (int j = 0; j < rebased.length; j++) rebased[j] += totalVertexCount;
                 allVertices.add(verts);
-                int[] rebasedForUpload = Arrays.copyOf(inds, inds.length);
-                for (int j = 0; j < rebasedForUpload.length; j++) {
-                    rebasedForUpload[j] += totalVertexCount;
-                }
-                allIndices.add(rebasedForUpload);
+                allIndices.add(rebased);
                 totalVertexCount += verts.length / 9;
-                totalIndexCount  += iLen;
+                totalIndexCount += iLen;
+                if (totalVertexCount < 0 || totalIndexCount < 0) {
+                    throw new java.io.IOException("Cache size overflow");
+                }
             }
 
-            // Pivot table
             int pivotLen = in.readInt();
-            if (pivotLen > bonePivotData.length) {
-                int requiredTypes = (pivotLen + MAX_BONES * 4 - 1) / (MAX_BONES * 4);
-                ensurePivotCapacity(requiredTypes - 1);
+            if (pivotLen < 0 || pivotLen > bonePivotData.length) {
+                throw new java.io.IOException("Invalid pivot table length: " + pivotLen);
             }
-            for (int i = 0; i < pivotLen; i++)
-                bonePivotData[i] = in.readFloat();
-            Arrays.fill(bonePivotWritten, true);
+            float[] loadedPivots = Arrays.copyOf(bonePivotData, bonePivotData.length);
+            boolean[] loadedWritten = new boolean[bonePivotWritten.length];
+            for (int i = 0; i < pivotLen; i++) loadedPivots[i] = in.readFloat();
+
+            // The cache stores a dense prefix of the pivot table, so mark complete
+            // bone slots covered by that prefix as present. Partial trailing slots are
+            // left unset instead of falsely claiming they contain valid pivots.
+            int floatsPerBone = 4;
+            int fullBoneSlots = Math.min(loadedWritten.length, pivotLen / floatsPerBone);
+            java.util.Arrays.fill(loadedWritten, 0, fullBoneSlots, true);
+
+            // Commit only after the complete file has passed validation.
+            cpuMeshes.clear();
+            cpuMeshes.putAll(loadedCpuMeshes);
+            meshInfoMap.clear();
+            meshInfoMap.putAll(loadedMeshInfo);
+            meshStatus.clear();
+            meshStatus.putAll(loadedStatuses);
+            System.arraycopy(loadedPivots, 0, bonePivotData, 0, bonePivotData.length);
+            bonePivotWritten = loadedWritten;
 
             uploadToGPU(allVertices, allIndices, totalVertexCount, totalIndexCount);
             bakeState = BakeState.READY;
@@ -1211,20 +1284,24 @@ public class EntityMeshBaker {
 
         } catch (Exception e) {
             Rentities.LOGGER.error("[EntityCache] Failed to load cache: {}", e.getMessage());
-            meshInfoMap.clear();
-            bakeState = BakeState.FAILED;
             return false;
         }
     }
 
     public static boolean cacheExists() { return getCacheFile().exists(); }
     public static void deleteCache()    { getCacheFile().delete(); }
-    public static void deleteTextureCache() { EntityTextureAtlas.deleteTextureCache(); }
 
     public void delete() {
         cacheExecutor.shutdown();
         if (vaoId != 0) glDeleteVertexArrays(vaoId);
         if (vboId != 0) glDeleteBuffers(vboId);
         if (eboId != 0) glDeleteBuffers(eboId);
+        if (pivotSSBOId != 0) {
+            glDeleteBuffers(pivotSSBOId);
+            pivotSSBOId = 0;
+        }
+        vaoId = 0;
+        vboId = 0;
+        eboId = 0;
     }
 }

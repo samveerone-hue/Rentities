@@ -19,6 +19,12 @@ public class RentitiesConfig {
     public boolean entity_batching_debug        = false;
     public boolean entity_batching_debug_solid  = false;
 
+    // GPU animation LOD
+    public boolean fast_animation_lod_enabled = true;
+    public float fast_animation_lod_medium_distance = 48.0f;
+    public float fast_animation_lod_far_distance = 96.0f;
+    public float fast_animation_lod_medium_scale = 0.35f;
+
     public static RentitiesConfig loadOrCreate() {
         if (CONFIG_PATH.toFile().exists()) {
             try (Reader r = new FileReader(CONFIG_PATH.toFile())) {

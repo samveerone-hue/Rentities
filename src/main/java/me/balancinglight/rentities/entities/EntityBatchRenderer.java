@@ -167,9 +167,6 @@ public class EntityBatchRenderer {
         }
         queuedTypes[idx] = type;
         extractionTypes[idx] = type;
-        Object directLoc = INSTANCE.entityTextureLocs.get(type);
-        extractionTextureLocs[idx] = directLoc;
-        extractionTextureIds[idx] = INSTANCE.textureKeyId(directLoc);
         queuedOriginalIndices[idx] = idx;
         if (!INSTANCE.writeEntityInstance(
                 extractionBuffer + (long) idx * EntityInstance.STRIDE, state, x, y, z)) {
@@ -177,6 +174,9 @@ public class EntityBatchRenderer {
             queueSize.decrementAndGet();
             return false;
         }
+        Object directLoc = INSTANCE.entityTextureLocs.get(type);
+        extractionTextureLocs[idx] = directLoc;
+        extractionTextureIds[idx] = INSTANCE.textureKeyId(directLoc);
         return true;
     }
 
@@ -250,9 +250,6 @@ public class EntityBatchRenderer {
         EntityType<?> type = getEntityType(state);
         queuedTypes[idx] = type;
         extractionTypes[idx] = type;
-        Object stateLoc = INSTANCE.entityTextureLocs.get(type);
-        extractionTextureLocs[idx] = stateLoc;
-        extractionTextureIds[idx] = INSTANCE.textureKeyId(stateLoc);
         queuedOriginalIndices[idx] = idx;
 
         if (!INSTANCE.writeEntityInstance(
@@ -266,6 +263,9 @@ public class EntityBatchRenderer {
             return false;
         }
 
+        Object stateLoc = INSTANCE.entityTextureLocs.get(type);
+        extractionTextureLocs[idx] = stateLoc;
+        extractionTextureIds[idx] = INSTANCE.textureKeyId(stateLoc);
         return true;
     }
 
@@ -351,7 +351,9 @@ public class EntityBatchRenderer {
                     EntityInstance.STRIDE);
             MemoryUtil.memPutInt(
                     dst + EntityInstance.OFFSET_GROUP_INDEX,
-                    (currentType != null && meshInfoMap.containsKey(currentType))
+                    (currentType != null
+                            && meshInfoMap.containsKey(currentType)
+                            && currentTextureId != 0)
                             ? groupIndex : -1);
         }
 
@@ -446,7 +448,9 @@ public class EntityBatchRenderer {
                 glUniform1f(uAnimationLodFarDistance, lodFar);
                 glUniform1f(uAnimationLodMediumScale, Math.max(0.0f, Math.min(1.0f, Rentities.config.fast_animation_lod_medium_scale)));
 
-                boolean indirect = cullPipeline.isAvailable() && storedViewProjection != null;
+                boolean indirect = Rentities.config.entity_gpu_culling_enabled
+                        && cullPipeline.isAvailable()
+                        && storedViewProjection != null;
                 if (indirect) {
                     indirect = renderIndirect(count, bufIdx);
                 }
@@ -525,8 +529,9 @@ public class EntityBatchRenderer {
                     && extractionTextureIds[queuedOriginalIndices[i]] == extractionTextureIds[queuedOriginalIndices[runStart]]) continue;
 
             EntityType<?> type = queuedTypes[runStart];
+            Object textureLoc = extractionTextureLocs[queuedOriginalIndices[runStart]];
             var meshInfo = type != null ? meshInfoMap.get(type) : null;
-            if (meshInfo != null) {
+            if (meshInfo != null && textureLoc != null) {
                 int g = cullPipeline.addGroup(meshInfo.indexCount, meshInfo.indexOffset,
                         runStart, i - runStart, type);
                 if (g < 0) {

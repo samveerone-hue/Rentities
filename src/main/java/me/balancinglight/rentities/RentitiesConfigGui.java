@@ -55,6 +55,26 @@ public class RentitiesConfigGui implements ConfigEntryPoint {
         );
 
         page.addOption(
+            builder.createBooleanOption(Identifier.parse("rentities:gpu_culling"))
+                .setName(Component.literal("GPU Entity Culling"))
+                .setTooltip(Component.literal(
+                    "Uses the compute/indirect culling path. Disabled by default because " +
+                    "the CPU-instanced path is the correctness fallback when camera/frustum " +
+                    "state is not runtime-validated."))
+                .setDefaultValue(false)
+                .setImpact(OptionImpact.HIGH)
+                .setEnabledProvider(c -> Rentities.IS_COMPATIBLE)
+                .setBinding(
+                    value -> {
+                        store.getData().entity_gpu_culling_enabled = value;
+                        store.save();
+                    },
+                    () -> store.getData().entity_gpu_culling_enabled
+                )
+                .setStorageHandler(noSave)
+        );
+
+        page.addOption(
             builder.createBooleanOption(Identifier.parse("rentities:animation_lod"))
                 .setName(Component.literal("Fast Animation LOD"))
                 .setTooltip(Component.literal(

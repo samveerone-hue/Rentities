@@ -16,6 +16,8 @@ import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 import java.util.*;
+import java.util.concurrent.*;
+import java.nio.file.*;
 
 import static org.lwjgl.opengl.GL11C.GL_FLOAT;
 import static org.lwjgl.opengl.GL15C.GL_STATIC_DRAW;
@@ -26,14 +28,17 @@ import static org.lwjgl.opengl.GL45C.*;
 public class EntityMeshBaker {
 
     public static final int VERTEX_STRIDE = 36; // 9 floats × 4 bytes
-    public static final int MAX_BONES        = 10;
-    public static final int MAX_ENTITY_TYPES = 256;
+    public static final int MAX_BONES = 10;
+    private static final int INITIAL_ENTITY_TYPE_CAPACITY = 64;
 
-    // Pivot data: [typeIdx * MAX_BONES + boneIdx] * 4 floats (x,y,z,0)
-    // Populated during baking, uploaded to GPU as a static SSBO.
-    private final float[] bonePivotData = new float[MAX_ENTITY_TYPES * MAX_BONES * 4];
+    // Pivot data: [typeIdx * MAX_BONES + boneIdx] * 4 floats (x,y,z,0).
+    // Capacity grows with the registry instead of imposing a fixed 256-type limit.
+    private float[] bonePivotData =
+            new float[INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES * 4];
+    private boolean[] bonePivotWritten =
+            new boolean[INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES];
     private int pivotSSBOId = 0;
-    private int currentBakingTypeIdx = -1; // set per-type during bake loop
+    private int currentBakingTypeIdx = -1;
 
     private int vaoId;
     private int vboId;
@@ -52,7 +57,24 @@ public class EntityMeshBaker {
     }
 
     private final Map<EntityType<?>, MeshInfo> meshInfoMap = new HashMap<>();
-    private boolean baked = false;
+    private final Map<EntityType<?>, CpuMesh> cpuMeshes = new LinkedHashMap<>();
+    private final Map<EntityType<?>, MeshStatus> meshStatus = new HashMap<>();
+    private final Map<EntityType<?>, Integer> failureCounts = new HashMap<>();
+    private final Map<EntityType<?>, Long> retryAfterNanos = new HashMap<>();
+
+    private enum BakeState { NOT_STARTED, BAKING, READY, FAILED }
+    private volatile BakeState bakeState = BakeState.NOT_STARTED;
+
+    public enum MeshStatus { UNKNOWN, BUILDING, READY }
+
+    private record CpuMesh(float[] vertices, int[] indices) {}
+    private record ExtractedMesh(float[] vertices, int[] indices, float[] pivots) {}
+
+    private final ExecutorService cacheExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "rentities-cache-save");
+        t.setDaemon(true);
+        return t;
+    });
 
     // Bone name → bone index maps per category
     // These match vanilla ModelPart child names exactly
@@ -177,130 +199,98 @@ public class EntityMeshBaker {
         CREEPER_BONES.put("leg4",        5);
     }
 
-    public void bake() {
-        if (baked) return;
-        baked = true;
+    public synchronized void bake() {
+        if (bakeState == BakeState.BAKING || bakeState == BakeState.READY) return;
+        bakeState = BakeState.BAKING;
 
-        // When cache exists and scan mode is OFF, skip the expensive extraction
-        // pipeline entirely and upload straight to GPU from the saved file.
-        if (!Rentities.config.entity_scan_mode && loadFromCache()) {
-            Rentities.LOGGER.info("[EntityCache] Using cached mesh data — skipping bake");
-            bootstrapTextures(Minecraft.getInstance().getEntityRenderDispatcher());
-            return;
-        }
-
-        if (Rentities.IS_DEBUG) {
-            Rentities.LOGGER.info("Starting Entity Mesh Baking...");
-        }
-
-        List<float[]> allVertices = new ArrayList<>();
-        List<int[]> allIndices = new ArrayList<>();
-        int vertexCount = 0;
-        int indexCount = 0;
-
-        var dispatcher = Minecraft.getInstance().getEntityRenderDispatcher();
-        if (dispatcher == null) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.error("EntityRenderDispatcher is NULL — cannot bake meshes");
-            return;
-        }
-
-        if (Rentities.IS_DEBUG) {
-            Rentities.LOGGER.info("EntityRenderDispatcher found. Registry has {} types.", EntityBatchRegistry.REGISTRY_TYPES().size());
-        }
-
-        var consumer = new EntityMeshCapturingConsumer();
-        var poseStack = new PoseStack();
-
-        // Get the renderer map via reflection (field_4696 in 1.21.11 EntityRenderDispatcher)
-        Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer<?, ?>> rendererMap =
-        getRendererMap(dispatcher);
-
-        if (rendererMap == null) {
-            Rentities.LOGGER.error(
-                    "Unable to access EntityRenderDispatcher renderer map; GPU entity baking disabled");
-            return;
-        }
-
-        for (EntityType<?> type : EntityBatchRegistry.REGISTRY_TYPES()) {
-            EntityAnimationCategory category = EntityBatchRegistry.getCategory(type);
-            if (category == EntityAnimationCategory.CPU_ANIMATED) {
-                if (Rentities.IS_DEBUG) Rentities.LOGGER.info("Skipping CPU_ANIMATED type: {}", type);
-                continue;
+        try {
+            if (!Rentities.config.entity_scan_mode && loadFromCache()) {
+                Rentities.LOGGER.info("[EntityCache] Using cached mesh data — skipping bake");
+                bootstrapTextures(Minecraft.getInstance().getEntityRenderDispatcher());
+                return;
             }
-            currentBakingTypeIdx = EntityBatchRegistry.getEntityTypeIndex(type);
 
-            float[] vertices = null;
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.info("Starting Entity Mesh Baking...");
+            }
 
-            // Try real extraction from renderer
-            try {
-                net.minecraft.client.renderer.entity.EntityRenderer<?, ?> renderer = null;
-                if (rendererMap != null) {
-                    renderer = rendererMap.get(type);
-                }
-                
-                if (renderer == null) {
-                    if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("No renderer found in map for {}", type);
-                } else if (renderer instanceof LivingEntityRenderer livingRenderer) {
-                    vertices = extractFromLivingRenderer(livingRenderer, category, consumer, poseStack);
-                    if (Rentities.IS_DEBUG) {
-                        if (vertices != null) {
-                            Rentities.LOGGER.info("Successfully baked mesh for {}: {} vertices", type, vertices.length / 9);
-                        } else {
-                            Rentities.LOGGER.warn("Mesh extraction returned NULL for {}", type);
-                        }
+            List<float[]> allVertices = new ArrayList<>();
+            List<int[]> allIndices = new ArrayList<>();
+            int vertexCount = 0;
+            int indexCount = 0;
+
+            var dispatcher = Minecraft.getInstance().getEntityRenderDispatcher();
+            if (dispatcher == null) {
+                throw new IllegalStateException("EntityRenderDispatcher is NULL");
+            }
+
+            var rendererMap = getRendererMap(dispatcher);
+            if (rendererMap == null) {
+                throw new IllegalStateException("Unable to access EntityRenderDispatcher renderer map");
+            }
+
+            for (EntityType<?> type : EntityBatchRegistry.REGISTRY_TYPES()) {
+                EntityAnimationCategory category = EntityBatchRegistry.getCategory(type);
+                if (category == EntityAnimationCategory.CPU_ANIMATED) continue;
+
+                currentBakingTypeIdx = EntityBatchRegistry.getEntityTypeIndex(type);
+                ensurePivotCapacity(currentBakingTypeIdx);
+                clearBonePivotSlot(currentBakingTypeIdx);
+                meshStatus.put(type, MeshStatus.BUILDING);
+
+                float[] vertices = null;
+                try {
+                    var renderer = rendererMap.get(type);
+                    if (renderer instanceof LivingEntityRenderer livingRenderer) {
+                        vertices = extractFromLivingRenderer(
+                                livingRenderer,
+                                category,
+                                new EntityMeshCapturingConsumer(),
+                                new PoseStack());
                     }
-                } else {
+                } catch (Throwable t) {
                     if (Rentities.IS_DEBUG) {
-                        String rName = renderer != null ? renderer.getClass().getName() : "NULL";
-                        Rentities.LOGGER.warn("Renderer for {} is not a LivingEntityRenderer (is {})", type, rName);
+                        Rentities.LOGGER.error("Failed to bake mesh for {}", type, t);
                     }
                 }
-            } catch (Exception e) {
-                if (Rentities.IS_DEBUG) {
-                    Rentities.LOGGER.error("Failed to bake real mesh for {}:", type, e);
+
+                if (vertices == null || vertices.length == 0) {
+                    meshStatus.remove(type);
+                    continue;
                 }
+
+                int[] localIndices = generateIndices(vertices.length / 9, 0);
+                int[] rebasedIndices = Arrays.copyOf(localIndices, localIndices.length);
+                for (int j = 0; j < rebasedIndices.length; j++) {
+                    rebasedIndices[j] += vertexCount;
+                }
+
+                meshInfoMap.put(type, new MeshInfo(
+                        vertexCount * VERTEX_STRIDE,
+                        indexCount * 4,
+                        rebasedIndices.length));
+                cpuMeshes.put(type, new CpuMesh(vertices, localIndices));
+                meshStatus.put(type, MeshStatus.READY);
+
+                allVertices.add(vertices);
+                allIndices.add(rebasedIndices);
+                vertexCount += vertices.length / 9;
+                indexCount += rebasedIndices.length;
             }
 
-            // Do not create fake production geometry when real extraction fails.
-            if (vertices == null || vertices.length == 0) {
-                if (Rentities.IS_DEBUG) {
-                    Rentities.LOGGER.warn(
-                        "No valid mesh extracted for {}; skipping GPU mesh registration",
-                       type);
-                }
-                continue;
-            }
-            
-            int[] indices = generateIndices(vertices.length / 9, vertexCount);
+            uploadToGPU(allVertices, allIndices, vertexCount, indexCount);
+            uploadPivotSSBO();
+            bootstrapTextures(dispatcher, rendererMap);
+            pendingTextureSave = true;
+            currentBakingTypeIdx = -1;
 
-            int byteVertexOffset = vertexCount * VERTEX_STRIDE;
-            int byteIndexOffset = indexCount * 4;
-            meshInfoMap.put(type, new MeshInfo(byteVertexOffset, byteIndexOffset, indices.length));
-
-            allVertices.add(vertices);
-            allIndices.add(indices);
-            vertexCount += vertices.length / 9;
-            indexCount += indices.length;
+            saveToCache();
+            bakeState = BakeState.READY;
+        } catch (Throwable t) {
+            currentBakingTypeIdx = -1;
+            bakeState = BakeState.FAILED;
+            Rentities.LOGGER.error("Entity mesh bake failed; it can be retried", t);
         }
-
-        if (Rentities.IS_DEBUG) {
-            Rentities.LOGGER.info("Baking complete. Total vertices: {}, Total indices: {}", vertexCount, indexCount);
-        }
-
-        uploadToGPU(allVertices, allIndices, vertexCount, indexCount);
-        bootstrapTextures(dispatcher, rendererMap);
-
-        // Always save after a fresh bake so next launch loads from cache.
-        // Resolve file path NOW on render thread before handing to background thread.
-        getCacheFile(); // ensure cacheFile is set while Minecraft.getInstance() is safe
-        final List<float[]> vFinal = allVertices;
-        final List<int[]>   iFinal = allIndices;
-        Thread saveThread = new Thread(() -> saveToCache(vFinal, iFinal), "rentities-cache-save");
-        saveThread.setDaemon(true);
-        saveThread.start();
-        // Texture atlas save needs to happen on the render thread (GL reads).
-        // Signal EntityBatchRenderer to save it on the next flush.
-        pendingTextureSave = true;
     }
 
     /** Set to true after bake to request a texture cache save from EntityBatchRenderer. */
@@ -463,16 +453,19 @@ public class EntityMeshBaker {
                 // translateAndRotate() with reset pose (rotation=0) only applies the
                 // pivot translation.  After the root scale(16,-16,16)+translate(0,-1.5,0)
                 // the matrix's translation column gives the pivot in shader pixel space.
-                if (currentBakingTypeIdx >= 0 && currentBakingTypeIdx < MAX_ENTITY_TYPES
+                if (currentBakingTypeIdx >= 0
                         && boneIdx >= 0 && boneIdx < MAX_BONES) {
                     Matrix4f m = poseStack.last().pose();
                     int base = (currentBakingTypeIdx * MAX_BONES + boneIdx) * 4;
-                    // Only write if not already set (first named bone wins per index)
-                    if (bonePivotData[base] == 0.0f && bonePivotData[base+1] == 0.0f && bonePivotData[base+2] == 0.0f) {
+                    int pivotIndex = currentBakingTypeIdx * MAX_BONES + boneIdx;
+                    // A zero pivot is valid. Use an explicit written bit instead of treating
+                    // (0,0,0) as the sentinel for an uninitialized bone.
+                    if (!bonePivotWritten[pivotIndex]) {
                         bonePivotData[base]   = m.m30();
                         bonePivotData[base+1] = m.m31();
                         bonePivotData[base+2] = m.m32();
                         bonePivotData[base+3] = 0.0f;
+                        bonePivotWritten[pivotIndex] = true;
                     }
                 }
 
@@ -486,6 +479,8 @@ public class EntityMeshBaker {
     }
 
     private Field cachedChildrenField = null;
+    private Field cachedCubesField = null;
+    private Method cachedCubeRenderMethod = null;
     private Field getChildrenField() {
         if (cachedChildrenField != null) return cachedChildrenField;
         for (String name : new String[]{"field_3661", "children", "n"}) {
@@ -512,55 +507,51 @@ public class EntityMeshBaker {
     private void renderPartCubesDirectly(ModelPart part, EntityMeshCapturingConsumer consumer,
                                    PoseStack poseStack) {
         try {
-            // Get cubes list via reflection
-            // field_3663 = cubes (Yarn), c = cubes (Mojang)
-            Field cubesField = null;
-            for (String name : new String[]{"field_3663", "cubes", "m"}) {
-                cubesField = getCachedField(ModelPart.class, name);
-                if (cubesField != null && List.class.isAssignableFrom(cubesField.getType())) break;
-            }
-
-            if (cubesField == null) {
-                // Fallback: search for any List field
-                for (Field f : ModelPart.class.getDeclaredFields()) {
-                    if (List.class.isAssignableFrom(f.getType())) {
-                        f.setAccessible(true);
-                        cubesField = f;
+            if (cachedCubesField == null) {
+                for (String name : new String[]{"field_3663", "cubes", "m"}) {
+                    Field f = getCachedField(ModelPart.class, name);
+                    if (f != null && List.class.isAssignableFrom(f.getType())) {
+                        cachedCubesField = f;
                         break;
                     }
                 }
             }
 
-            if (cubesField == null) return;
+            if (cachedCubesField == null) return;
 
             @SuppressWarnings("unchecked")
-            List<?> cubes = (List<?>) cubesField.get(part);
+            List<?> cubes = (List<?>) cachedCubesField.get(part);
             if (cubes == null || cubes.isEmpty()) return;
 
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.info("Rendering {} cubes", cubes.size());
-
-            // ModelPart.Cube.render(PoseStack.Entry, VertexConsumer, int, int, int)
-            // Intermediate name for Cube.render: method_32089
             for (Object cube : cubes) {
-                try {
-                    Method m = null;
-                    // Search for any method with 5 parameters (PoseStack.Entry, VertexConsumer, int, int, int)
+                if (cachedCubeRenderMethod == null ||
+                        !cachedCubeRenderMethod.getDeclaringClass().isAssignableFrom(cube.getClass())) {
+                    cachedCubeRenderMethod = null;
                     for (Method cand : cube.getClass().getDeclaredMethods()) {
-                        if (cand.getParameterCount() == 5 && 
-                            VertexConsumer.class.isAssignableFrom(cand.getParameterTypes()[1])) {
-                            m = cand;
+                        if (cand.getParameterCount() == 5
+                                && VertexConsumer.class.isAssignableFrom(cand.getParameterTypes()[1])) {
+                            cand.setAccessible(true);
+                            cachedCubeRenderMethod = cand;
                             break;
                         }
                     }
+                }
 
-                    if (m != null) {
-                        m.setAccessible(true);
-                        // Parameters: (PoseStack.Entry, VertexConsumer, int, int, int)
-                        m.invoke(cube, poseStack.last(), consumer, 0xF000F0, 0, 0xFFFFFFFF);
-                    }
-                } catch (Exception e) { }
+                if (cachedCubeRenderMethod != null) {
+                    cachedCubeRenderMethod.invoke(
+                            cube,
+                            poseStack.last(),
+                            consumer,
+                            0xF000F0,
+                            0,
+                            0xFFFFFFFF);
+                }
             }
-        } catch (Exception e) { }
+        } catch (Exception e) {
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.warn("renderPartCubesDirectly failed: {}", e.getMessage());
+            }
+        }
     }
 
     /**
@@ -761,162 +752,72 @@ public class EntityMeshBaker {
     }
 
 
-    private float[] generatePlaceholderMesh(EntityAnimationCategory category) {
-        List<float[]> bones = new ArrayList<>();
-        // In 1.21.11, we capture meshes in PIXEL units (16 units = 1 block).
-        // The shader then scales by 0.0625.
-        // So placeholders must also be in pixels.
-        switch (category) {
-            case BIPED, CREEPER -> {
-                bones.add(box(-4, 24, -4, 8, 8, 8, 0));   // HEAD
-                bones.add(box(-4, 12, -2, 8, 12, 4, 1));  // BODY
-                bones.add(box(-8, 12, -2, 4, 12, 4, 2));  // ARM_L
-                bones.add(box( 4, 12, -2, 4, 12, 4, 3));  // ARM_R
-                bones.add(box(-4,  0, -2, 4, 12, 4, 4));  // LEG_L
-                bones.add(box( 0,  0, -2, 4, 12, 4, 5));  // LEG_R
-            }
-            case QUADRUPED, GOAT, SNIFFER, ARMADILLO -> {
-                bones.add(box(-4, 16, -8, 8, 8, 8, 0));    // HEAD
-                bones.add(box(-5, 10, -6, 10, 8, 16, 1));  // BODY
-                bones.add(box(-7,  0, -2, 4, 10, 4, 2));   // LEG_FL
-                bones.add(box( 3,  0, -2, 4, 10, 4, 3));   // LEG_FR
-                bones.add(box(-7,  0,  8, 4, 10, 4, 4));   // LEG_BL
-                bones.add(box( 3,  0,  8, 4, 10, 4, 5));   // LEG_BR
-            }
-            case HORSE -> {
-                bones.add(box(-3, 16, -7, 6, 8, 6, 0));   // HEAD
-                bones.add(box(-5, 10, -6, 10, 8, 16, 1)); // BODY
-                bones.add(box(-6,  0, -2, 4, 10, 4, 2));
-                bones.add(box( 2,  0, -2, 4, 10, 4, 3));
-                bones.add(box(-6,  0,  8, 4, 10, 4, 4));
-                bones.add(box( 2,  0,  8, 4, 10, 4, 5));
-                bones.add(box(-1,  6, 10, 2, 8, 2, 6));   // TAIL
-            }
-            case BIRD -> {
-                bones.add(box(-2, 14,  -4, 4, 4, 4, 0));  // HEAD
-                bones.add(box(-3,  9,  -3, 6, 6, 8, 1));  // BODY
-                bones.add(box(-6,  9,  -3, 3, 2, 6, 2));  // WING_L
-                bones.add(box( 3,  9,  -3, 3, 2, 6, 3));  // WING_R
-                bones.add(box(-2,  0,  -1, 2, 9, 2, 4));  // LEG_L
-                bones.add(box( 0,  0,  -1, 2, 9, 2, 5));  // LEG_R
-            }
-            case SLIME -> {
-                bones.add(box(-3, 1, -3, 6, 6, 6, 0));   // BODY
-                bones.add(box(-2, 2, -4, 4, 4, 4, 0));   // INNER
-            }
-            default -> bones.add(box(-4, 0, -4, 8, 16, 8, 0));
-        }
-        int total = bones.stream().mapToInt(b -> b.length).sum();
-        float[] result = new float[total];
-        int pos = 0;
-        for (float[] b : bones) { System.arraycopy(b, 0, result, pos, b.length); pos += b.length; }
-        return result;
-    }
-
-    /** Box mesh: 24 vertices (4 per face × 6 faces), 9 floats each. */
-    private float[] box(float x, float y, float z, float w, float h, float d, int bone) {
-        float x2 = x+w, y2 = y+h, z2 = z+d, bf = (float)bone;
-        // Vertices: pos(3), normal(3), uv(2), bone(1) = 9 floats
-        return new float[]{
-            // Top (Y+) - Normal (0,1,0)
-            x,y2,z,  0,1,0, 0,0,bf,  
-            x,y2,z2,  0,1,0, 0,1,bf,  
-            x2,y2,z2, 0,1,0, 1,1,bf,  
-            x2,y2,z, 0,1,0, 1,0,bf,
-            
-            // Bottom (Y-) - Normal (0,-1,0)
-            x,y,z,  0,-1,0, 0,0,bf,  
-            x2,y,z,  0,-1,0, 1,0,bf,  
-            x2,y,z2, 0,-1,0, 1,1,bf,  
-            x,y,z2, 0,-1,0, 0,1,bf,
-            
-            // Right (X+) - Normal (1,0,0)
-            x2,y,z,  1,0,0, 0,0,bf,  
-            x2,y2,z, 1,0,0, 0,1,bf,  
-            x2,y2,z2, 1,0,0, 1,1,bf,  
-            x2,y,z2, 1,0,0, 1,0,bf,
-            
-            // Left (X-) - Normal (-1,0,0)
-            x,y,z,  -1,0,0, 0,0,bf,  
-            x,y,z2,  -1,0,0, 1,0,bf,  
-            x,y2,z2, -1,0,0, 1,1,bf,  
-            x,y2,z, -1,0,0, 0,1,bf,
-            
-            // Front (Z+) - Normal (0,0,1)
-            x,y,z2,  0,0,1, 0,0,bf,  
-            x2,y,z2, 0,0,1, 1,0,bf,  
-            x2,y2,z2, 0,0,1, 1,1,bf,  
-            x,y2,z2, 0,0,1, 0,1,bf,
-            
-            // Back (Z-) - Normal (0,0,-1)
-            x,y,z,   0,0,-1,0,0,bf,  
-            x,y2,z,  0,0,-1,0,1,bf,  
-            x2,y2,z, 0,0,-1, 1,1,bf,  
-            x2,y,z,  0,0,-1,1,0,bf,
-        };
-    }
-
-
     private void uploadToGPU(List<float[]> allVertices, List<int[]> allIndices,
                               int totalVertices, int totalIndices) {
+        if (vaoId != 0) glDeleteVertexArrays(vaoId);
+        if (vboId != 0) glDeleteBuffers(vboId);
+        if (eboId != 0) glDeleteBuffers(eboId);
         vaoId = glCreateVertexArrays();
         vboId = glCreateBuffers();
         eboId = glCreateBuffers();
 
         long vboSize = (long) totalVertices * VERTEX_STRIDE;
-        long eboSize = (long) totalIndices * 4;
+        long eboSize = (long) totalIndices * 4L;
         glNamedBufferData(vboId, vboSize, GL_STATIC_DRAW);
         glNamedBufferData(eboId, eboSize, GL_STATIC_DRAW);
 
-        long vboOff = 0, eboOff = 0;
-        for (int i = 0; i < allVertices.size(); i++) {
-            float[] verts = allVertices.get(i);
-            int[] inds = allIndices.get(i);
+        ByteBuffer vbuf = MemoryUtil.memAlloc((int) vboSize);
+        ByteBuffer ibuf = MemoryUtil.memAlloc((int) eboSize);
+        try {
+            FloatBuffer vf = vbuf.asFloatBuffer();
+            long vertexCursor = 0;
+            long indexCursor = 0;
 
-            ByteBuffer vbuf = MemoryUtil.memAlloc(verts.length * 4);
-            vbuf.asFloatBuffer().put(verts);
-            glNamedBufferSubData(vboId, vboOff, vbuf);
-            MemoryUtil.memFree(vbuf);
+            for (int i = 0; i < allVertices.size(); i++) {
+                float[] verts = allVertices.get(i);
+                int[] inds = allIndices.get(i);
 
-            ByteBuffer ibuf = MemoryUtil.memAlloc(inds.length * 4);
-            // Verify indices are within total vertex range
-            for (int idx : inds) {
-                if (idx >= totalVertices) {
-                    if (Rentities.IS_DEBUG) Rentities.LOGGER.error("INDEX OUT OF BOUNDS: {} >= {}", idx, totalVertices);
+                vf.put(verts);
+                for (int idx : inds) {
+                    if (idx < 0 || idx >= totalVertices) {
+                        if (Rentities.IS_DEBUG) {
+                            Rentities.LOGGER.error("INDEX OUT OF BOUNDS: {} not in [0,{})",
+                                    idx, totalVertices);
+                        }
+                    }
+                }
+                ibuf.asIntBuffer().put(inds);
+
+                vertexCursor += (long) verts.length * 4L;
+                indexCursor += (long) inds.length * 4L;
+                if (i + 1 < allVertices.size()) {
+                    vf = vbuf.asFloatBuffer();
+                    vf.position((int)(vertexCursor / 4L));
+                    ibuf.asIntBuffer().position((int)(indexCursor / 4L));
                 }
             }
-            ibuf.asIntBuffer().put(inds);
-            glNamedBufferSubData(eboId, eboOff, ibuf);
-            MemoryUtil.memFree(ibuf);
 
-            vboOff += (long) verts.length * 4;
-            eboOff += (long) inds.length * 4;
+            glNamedBufferSubData(vboId, 0, vbuf);
+            glNamedBufferSubData(eboId, 0, ibuf);
+        } finally {
+            MemoryUtil.memFree(vbuf);
+            MemoryUtil.memFree(ibuf);
         }
 
-        // VAO attrib layout
         glVertexArrayVertexBuffer(vaoId, 0, vboId, 0, VERTEX_STRIDE);
-        // Attrib 0: position (vec3, offset 0)
         glEnableVertexArrayAttrib(vaoId, 0);
         glVertexArrayAttribFormat(vaoId, 0, 3, GL_FLOAT, false, 0);
         glVertexArrayAttribBinding(vaoId, 0, 0);
-        // Attrib 1: normal (vec3, offset 12)
         glEnableVertexArrayAttrib(vaoId, 1);
         glVertexArrayAttribFormat(vaoId, 1, 3, GL_FLOAT, false, 12);
         glVertexArrayAttribBinding(vaoId, 1, 0);
-        // Attrib 2: texcoord (vec2, offset 24)
         glEnableVertexArrayAttrib(vaoId, 2);
         glVertexArrayAttribFormat(vaoId, 2, 2, GL_FLOAT, false, 24);
         glVertexArrayAttribBinding(vaoId, 2, 0);
-        // Attrib 3: boneIndex (float, offset 32)
         glEnableVertexArrayAttrib(vaoId, 3);
         glVertexArrayAttribFormat(vaoId, 3, 1, GL_FLOAT, false, 32);
         glVertexArrayAttribBinding(vaoId, 3, 0);
-
         glVertexArrayElementBuffer(vaoId, eboId);
-        
-        // Final sanity check: force VAO binding to ensure state is captured
-        glBindVertexArray(vaoId);
-        glBindVertexArray(0);
     }
 
     private int[] generateIndices(int vertexCount, int baseVertex) {
@@ -930,9 +831,173 @@ public class EntityMeshBaker {
         return idx;
     }
 
+    private void ensurePivotCapacity(int typeIndex) {
+        int requiredTypes = typeIndex + 1;
+        int currentTypes = bonePivotData.length / (MAX_BONES * 4);
+        if (requiredTypes <= currentTypes) return;
+
+        int newTypes = Math.max(requiredTypes, currentTypes * 2);
+        bonePivotData = Arrays.copyOf(
+                bonePivotData, newTypes * MAX_BONES * 4);
+        bonePivotWritten = Arrays.copyOf(
+                bonePivotWritten, newTypes * MAX_BONES);
+    }
+
+    private void clearBonePivotSlot(int typeIndex) {
+        if (typeIndex < 0) return;
+        ensurePivotCapacity(typeIndex);
+        int start = typeIndex * MAX_BONES;
+        Arrays.fill(bonePivotWritten, start, start + MAX_BONES, false);
+        Arrays.fill(bonePivotData, typeIndex * MAX_BONES * 4,
+                (typeIndex + 1) * MAX_BONES * 4, 0.0f);
+    }
+
+    /**
+     * Dynamically extract and register a missing mesh without requiring Scan Mode or a restart.
+     * Must be called from the Minecraft render thread because it touches live renderer/model data and GL buffers.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public synchronized MeshStatus ensureMeshFor(EntityType<?> type) {
+        if (type == null) return MeshStatus.UNKNOWN;
+        if (cpuMeshes.containsKey(type)) return MeshStatus.READY;
+
+        long now = System.nanoTime();
+        long retryAt = retryAfterNanos.getOrDefault(type, 0L);
+        if (now < retryAt) return MeshStatus.UNKNOWN;
+
+        MeshStatus known = meshStatus.get(type);
+        if (known == MeshStatus.BUILDING) return MeshStatus.BUILDING;
+
+        var dispatcher = Minecraft.getInstance().getEntityRenderDispatcher();
+        if (dispatcher == null) {
+            recordExtractionFailure(type, now);
+            return MeshStatus.UNKNOWN;
+        }
+
+        Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer<?, ?>> rendererMap =
+                getRendererMap(dispatcher);
+        if (rendererMap == null) {
+            recordExtractionFailure(type, now);
+            return MeshStatus.UNKNOWN;
+        }
+
+        var renderer = rendererMap.get(type);
+        if (!(renderer instanceof LivingEntityRenderer livingRenderer)) {
+            // This is not a permanent failure. A renderer may be initialized later,
+            // and generic renderer adapters can be added without poisoning this type.
+            recordExtractionFailure(type, now);
+            return MeshStatus.UNKNOWN;
+        }
+
+        EntityAnimationCategory category = EntityBatchRegistry.getCategory(type);
+        if (category == EntityAnimationCategory.CPU_ANIMATED) {
+            // The CPU path owns these types; leave them to vanilla rather than marking
+            // them as an extraction failure.
+            return MeshStatus.UNKNOWN;
+        }
+
+        meshStatus.put(type, MeshStatus.BUILDING);
+        currentBakingTypeIdx = EntityBatchRegistry.getEntityTypeIndex(type);
+        ensurePivotCapacity(currentBakingTypeIdx);
+
+        // Extract into an isolated pivot buffer so a failed extraction cannot partially
+        // mutate the authoritative pivot table.
+        float[] previousPivots = Arrays.copyOf(bonePivotData, bonePivotData.length);
+        boolean[] previousWritten = Arrays.copyOf(bonePivotWritten, bonePivotWritten.length);
+
+        try {
+            clearBonePivotSlot(currentBakingTypeIdx);
+
+            float[] vertices = extractFromLivingRenderer(
+                    livingRenderer,
+                    category,
+                    new EntityMeshCapturingConsumer(),
+                    new PoseStack());
+
+            if (vertices == null || vertices.length == 0) {
+                bonePivotData = previousPivots;
+                bonePivotWritten = previousWritten;
+                recordExtractionFailure(type, System.nanoTime());
+                meshStatus.remove(type);
+                return MeshStatus.UNKNOWN;
+            }
+
+            int[] indices = generateIndices(vertices.length / 9, 0);
+            CpuMesh mesh = new CpuMesh(vertices, indices);
+
+            // Commit mesh + pivots together only after extraction succeeds.
+            cpuMeshes.put(type, mesh);
+            meshStatus.put(type, MeshStatus.READY);
+            failureCounts.remove(type);
+            retryAfterNanos.remove(type);
+
+            rebuildGpuBuffersFromCpuMeshes();
+            uploadPivotSSBO();
+            bootstrapTextures(dispatcher, rendererMap);
+            saveCurrentMeshesToCacheAsync();
+            return MeshStatus.READY;
+        } catch (Throwable t) {
+            bonePivotData = previousPivots;
+            bonePivotWritten = previousWritten;
+            meshStatus.remove(type);
+            recordExtractionFailure(type, System.nanoTime());
+            Rentities.LOGGER.error("Dynamic mesh extraction failed for {}", type, t);
+            return MeshStatus.UNKNOWN;
+        } finally {
+            currentBakingTypeIdx = -1;
+        }
+    }
+
+    private void recordExtractionFailure(EntityType<?> type, long now) {
+        int failures = failureCounts.merge(type, 1, Integer::sum);
+        int shift = Math.min(Math.max(failures - 1, 0), 5);
+        long delay = TimeUnit.SECONDS.toNanos(1L << shift);
+        delay = Math.min(delay, TimeUnit.SECONDS.toNanos(30L));
+        retryAfterNanos.put(type, now + delay);
+        meshStatus.remove(type);
+    }
+
+    private void rebuildGpuBuffersFromCpuMeshes() {
+        List<float[]> vertices = new ArrayList<>();
+        List<int[]> indices = new ArrayList<>();
+        meshInfoMap.clear();
+        int vertexCount = 0;
+        int indexCount = 0;
+        for (Map.Entry<EntityType<?>, CpuMesh> entry : cpuMeshes.entrySet()) {
+            CpuMesh mesh = entry.getValue();
+            int[] baseIndices = mesh.indices();
+            int[] rebased = Arrays.copyOf(baseIndices, baseIndices.length);
+            for (int i = 0; i < rebased.length; i++) rebased[i] += vertexCount;
+            int vByte = vertexCount * VERTEX_STRIDE;
+            int iByte = indexCount * 4;
+            meshInfoMap.put(entry.getKey(), new MeshInfo(vByte, iByte, rebased.length));
+            vertices.add(mesh.vertices());
+            indices.add(rebased);
+            vertexCount += mesh.vertices().length / 9;
+            indexCount += rebased.length;
+        }
+        uploadToGPU(vertices, indices, vertexCount, indexCount);
+        if (pivotSSBOId != 0) uploadPivotSSBO();
+    }
+
+    private Map<EntityType<?>, CpuMesh> snapshotCpuMeshes() {
+        return new LinkedHashMap<>(cpuMeshes);
+    }
+
+    private void saveCurrentMeshesToCacheAsync() {
+        getCacheFile(); // resolve on the render thread
+        Map<EntityType<?>, CpuMesh> snapshot = snapshotCpuMeshes();
+        cacheExecutor.execute(() -> saveCpuMeshesToCache(snapshot));
+    }
+
+    private void saveCpuMeshesToCache(Map<EntityType<?>, CpuMesh> meshes) {
+        saveToCacheInternal(meshes);
+    }
+
     public int getVaoId() { return vaoId; }
     public Map<EntityType<?>, MeshInfo> getMeshInfoMap() { return meshInfoMap; }
-    public boolean isBaked() { return baked; }
+    public boolean isBaked() { return bakeState == BakeState.READY; }
+    public BakeState getBakeState() { return bakeState; }
 
 
     /**
@@ -941,8 +1006,7 @@ public class EntityMeshBaker {
      * Returns the GL buffer id.
      */
     public int uploadPivotSSBO() {
-        if (pivotSSBOId != 0) return pivotSSBOId; // already uploaded
-        pivotSSBOId = glCreateBuffers();
+        if (pivotSSBOId == 0) pivotSSBOId = glCreateBuffers();
         ByteBuffer buf = MemoryUtil.memAlloc(bonePivotData.length * 4);
         buf.asFloatBuffer().put(bonePivotData).flip();
         glNamedBufferData(pivotSSBOId, buf, GL_STATIC_DRAW);
@@ -954,7 +1018,7 @@ public class EntityMeshBaker {
     public int getPivotSSBOId() { return pivotSSBOId; }
 
     private static final int CACHE_MAGIC   = 0xECAC1021;
-    private static final int CACHE_VERSION = 2;
+    private static final int CACHE_VERSION = 4;
 
     /** Cache file location: .minecraft/rentities_entity_mesh_cache.bin */
     private static java.io.File cacheFile = null;
@@ -972,49 +1036,77 @@ public class EntityMeshBaker {
      * Serialises the baked mesh data to disk.
      * Call after bake() succeeds.
      */
-    public void saveToCache(List<float[]> allVertices, List<int[]> allIndices) {
-        java.io.File f = getCacheFile();
-        List<EntityType<?>> types = new ArrayList<>(meshInfoMap.keySet());
+    public void saveToCache() {
+        getCacheFile(); // resolve while Minecraft is on the render thread
+        cacheExecutor.execute(() -> saveToCacheInternal(snapshotCpuMeshes()));
+    }
 
+    private void saveToCacheInternal(Map<EntityType<?>, CpuMesh> meshes) {
+        java.io.File f = getCacheFile();
+        java.nio.file.Path target = f.toPath();
+        java.nio.file.Path temp = target.resolveSibling(target.getFileName() + ".tmp");
         try (java.io.DataOutputStream out = new java.io.DataOutputStream(
-                new java.io.BufferedOutputStream(new java.io.FileOutputStream(f)))) {
+                new java.io.BufferedOutputStream(
+                        java.nio.file.Files.newOutputStream(
+                                temp,
+                                StandardOpenOption.CREATE,
+                                StandardOpenOption.TRUNCATE_EXISTING,
+                                StandardOpenOption.WRITE)))) {
             out.writeInt(CACHE_MAGIC);
             out.writeInt(CACHE_VERSION);
-            out.writeInt(types.size());
+            out.writeInt(meshes.size());
 
-            int i = 0;
-            for (EntityType<?> type : types) {
-                MeshInfo info = meshInfoMap.get(type);
-                float[] verts = allVertices.get(i);
-                int[]   inds  = allIndices.get(i);
-                i++;
+            int vertexOffset = 0;
+            int indexOffset = 0;
+            for (Map.Entry<EntityType<?>, CpuMesh> entry : meshes.entrySet()) {
+                EntityType<?> type = entry.getKey();
+                CpuMesh mesh = entry.getValue();
 
-                // Type ID
                 String id = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE
                         .getKey(type).toString();
                 byte[] idBytes = id.getBytes(java.nio.charset.StandardCharsets.UTF_8);
                 out.writeInt(idBytes.length);
                 out.write(idBytes);
 
-                // Vertices
+                float[] verts = mesh.vertices();
+                int[] inds = mesh.indices();
+                int[] rebased = Arrays.copyOf(inds, inds.length);
+                for (int i = 0; i < rebased.length; i++) rebased[i] += vertexOffset;
+
                 out.writeInt(verts.length);
                 for (float v : verts) out.writeFloat(v);
+                out.writeInt(rebased.length);
+                for (int idx : rebased) out.writeInt(idx);
 
-                // Indices
-                out.writeInt(inds.length);
-                for (int idx : inds) out.writeInt(idx);
+                out.writeInt(vertexOffset * VERTEX_STRIDE);
+                out.writeInt(indexOffset * 4);
+                out.writeInt(rebased.length);
 
-                // Mesh info
-                out.writeInt(info.vertexOffset);
-                out.writeInt(info.indexOffset);
-                out.writeInt(info.indexCount);
+                vertexOffset += verts.length / 9;
+                indexOffset += rebased.length;
             }
 
-            // Full bone pivot table
             out.writeInt(bonePivotData.length);
             for (float p : bonePivotData) out.writeFloat(p);
 
-            Rentities.LOGGER.info("[EntityCache] Saved {} entity types to {}", types.size(), f.getPath());
+            out.flush();
+        } catch (Exception e) {
+            Rentities.LOGGER.error("[EntityCache] Failed to serialize cache: {}", e.getMessage());
+            return;
+        }
+
+        try {
+            try {
+                java.nio.file.Files.move(
+                        temp, target,
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException ignored) {
+                java.nio.file.Files.move(
+                        temp, target,
+                        StandardCopyOption.REPLACE_EXISTING);
+            }
+            Rentities.LOGGER.info("[EntityCache] Saved {} entity types to {}", meshes.size(), f.getPath());
         } catch (Exception e) {
             Rentities.LOGGER.error("[EntityCache] Failed to save cache: {}", e.getMessage());
         }
@@ -1029,6 +1121,10 @@ public class EntityMeshBaker {
         java.io.File f = getCacheFile();
         if (!f.exists()) return false;
 
+        cpuMeshes.clear();
+        meshInfoMap.clear();
+        meshStatus.clear();
+
         try (java.io.DataInputStream in = new java.io.DataInputStream(
                 new java.io.BufferedInputStream(new java.io.FileInputStream(f)))) {
 
@@ -1038,6 +1134,12 @@ public class EntityMeshBaker {
             int typeCount = in.readInt();
             List<float[]> allVertices = new ArrayList<>(typeCount);
             List<int[]>   allIndices  = new ArrayList<>(typeCount);
+
+            Map<String, EntityType<?>> typesById = new HashMap<>();
+            for (EntityType<?> candidate : EntityBatchRegistry.REGISTRY_TYPES()) {
+                Object key = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(candidate);
+                if (key != null) typesById.put(key.toString(), candidate);
+            }
             int totalVertexCount = 0, totalIndexCount = 0;
 
             for (int i = 0; i < typeCount; i++) {
@@ -1048,14 +1150,7 @@ public class EntityMeshBaker {
                 String id = new String(idBytes, java.nio.charset.StandardCharsets.UTF_8);
                 // Find entity type by matching the saved ID string against all known types.
                 // Avoids ResourceLocation/reflection issues — same iteration used in bake().
-                EntityType<?> type = null;
-                for (EntityType<?> candidate : EntityBatchRegistry.REGISTRY_TYPES()) {
-                    Object key = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(candidate);
-                    if (key != null && key.toString().equals(id)) {
-                        type = candidate;
-                        break;
-                    }
-                }
+                EntityType<?> type = typesById.get(id);
                 if (type == null) {
                     Rentities.LOGGER.warn("[EntityCache] Unknown entity type: {}, skipping", id);
                     // Still need to read past the data
@@ -1074,34 +1169,50 @@ public class EntityMeshBaker {
                 int iLen = in.readInt();
                 int[] inds = new int[iLen];
                 for (int j = 0; j < iLen; j++) inds[j] = in.readInt();
+                cpuMeshes.put(type, new CpuMesh(verts, inds));
+                meshStatus.put(type, MeshStatus.READY);
 
-                // Mesh info
+                // Mesh info in the cache contains global byte offsets. The authoritative
+                // CPU mesh map stores local indices so rebuilding can safely rebase once.
                 int vOffset = in.readInt();
                 int iOffset = in.readInt();
                 int iCount  = in.readInt();
+                int baseVertex = vOffset / VERTEX_STRIDE;
+                for (int j = 0; j < inds.length; j++) {
+                    inds[j] -= baseVertex;
+                }
+
                 meshInfoMap.put(type, new MeshInfo(vOffset, iOffset, iCount));
 
                 allVertices.add(verts);
-                allIndices.add(inds);
+                int[] rebasedForUpload = Arrays.copyOf(inds, inds.length);
+                for (int j = 0; j < rebasedForUpload.length; j++) {
+                    rebasedForUpload[j] += totalVertexCount;
+                }
+                allIndices.add(rebasedForUpload);
                 totalVertexCount += verts.length / 9;
                 totalIndexCount  += iLen;
             }
 
             // Pivot table
             int pivotLen = in.readInt();
-            for (int i = 0; i < Math.min(pivotLen, bonePivotData.length); i++)
+            if (pivotLen > bonePivotData.length) {
+                int requiredTypes = (pivotLen + MAX_BONES * 4 - 1) / (MAX_BONES * 4);
+                ensurePivotCapacity(requiredTypes - 1);
+            }
+            for (int i = 0; i < pivotLen; i++)
                 bonePivotData[i] = in.readFloat();
+            Arrays.fill(bonePivotWritten, true);
 
-            // Upload to GPU
             uploadToGPU(allVertices, allIndices, totalVertexCount, totalIndexCount);
-            baked = true;
+            bakeState = BakeState.READY;
             Rentities.LOGGER.info("[EntityCache] Loaded {} entity types from cache", meshInfoMap.size());
             return true;
 
         } catch (Exception e) {
             Rentities.LOGGER.error("[EntityCache] Failed to load cache: {}", e.getMessage());
             meshInfoMap.clear();
-            baked = false;
+            bakeState = BakeState.FAILED;
             return false;
         }
     }
@@ -1111,6 +1222,7 @@ public class EntityMeshBaker {
     public static void deleteTextureCache() { EntityTextureAtlas.deleteTextureCache(); }
 
     public void delete() {
+        cacheExecutor.shutdown();
         if (vaoId != 0) glDeleteVertexArrays(vaoId);
         if (vboId != 0) glDeleteBuffers(vboId);
         if (eboId != 0) glDeleteBuffers(eboId);

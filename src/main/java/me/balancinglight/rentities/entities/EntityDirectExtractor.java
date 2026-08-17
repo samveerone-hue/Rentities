@@ -43,7 +43,6 @@ public final class EntityDirectExtractor {
      * Returned in place of a real render state. Never populated and never rendered; it exists
      * only so the vanilla caller has a non-null object to add to its list.
      */
-    public static final ArmorStandRenderState SENTINEL_ARMOR_STAND_STATE = null;
 
     /**
      * Kept as the normal dispatcher sentinel used by the existing mixin.
@@ -228,7 +227,10 @@ public final class EntityDirectExtractor {
 
                 headPitchRel =
                         (float) Math.toRadians(
-                                living.getViewXRot(partialTick));
+                                net.minecraft.util.Mth.lerp(
+                                        partialTick,
+                                        living.xRotO,
+                                        living.getXRot()));
 
                 attackProgress = living.getAttackAnim(partialTick);
                 swimProgress = living.getSwimAmount(partialTick);
@@ -290,7 +292,10 @@ public final class EntityDirectExtractor {
                     riptide = 1f;
                 }
             } else {
-                bodyYawDeg = entity.getViewYRot(partialTick);
+                bodyYawDeg = lerpDegrees(
+                        partialTick,
+                        entity.yRotO,
+                        entity.getYRot());
             }
         }
 
@@ -300,7 +305,7 @@ public final class EntityDirectExtractor {
 
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_ROTATION_Y,
-                (float) (Math.toRadians(bodyYawDeg) - Math.PI));
+                (float) Math.toRadians(180.0f - bodyYawDeg));
 
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_LIMB_SWING,

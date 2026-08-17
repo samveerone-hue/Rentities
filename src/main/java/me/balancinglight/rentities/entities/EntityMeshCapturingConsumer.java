@@ -39,31 +39,17 @@ public class EntityMeshCapturingConsumer implements VertexConsumer {
         return captured.size(); //[cite: 1]
     }
 
-    public float[] bakeAndReset() { //[cite: 1]
-        float[] result = new float[captured.size() * 9]; //[cite: 1]
-        int i = 0; //[cite: 1]
-        
-        // FIX: Process vertices in groups of 4 (Vanilla Minecraft uses Quads)
-        for (int q = 0; q < captured.size(); q += 4) {
-            // Check if we have a full quad remaining
-            if (q + 3 < captured.size()) {
-                // Reverse the winding order (3, 2, 1, 0) to fix the inside-out UV mirroring caused by the Y-flip
-                System.arraycopy(captured.get(q + 3), 0, result, i, 9);
-                System.arraycopy(captured.get(q + 2), 0, result, i + 9, 9);
-                System.arraycopy(captured.get(q + 1), 0, result, i + 18, 9);
-                System.arraycopy(captured.get(q + 0), 0, result, i + 27, 9);
-                i += 36;
-            } else {
-                // Fallback for leftover vertices (e.g. triangles)
-                for (int rem = q; rem < captured.size(); rem++) {
-                    System.arraycopy(captured.get(rem), 0, result, i, 9);
-                    i += 9;
-                }
-            }
+    public float[] bakeAndReset() {
+        // Preserve Minecraft's vertex order exactly. UVs are attached to the
+        // corresponding vertex, so reversing a quad here mirrors/flips the texture.
+        float[] result = new float[captured.size() * 9];
+        int offset = 0;
+        for (float[] vertex : captured) {
+            System.arraycopy(vertex, 0, result, offset, 9);
+            offset += 9;
         }
-        
-        captured.clear(); //[cite: 1]
-        return result; //[cite: 1]
+        captured.clear();
+        return result;
     }
 
     public void reset() { //[cite: 1]

@@ -993,8 +993,8 @@ void main() {
      * Entity yaw rotation:
      * vanilla applies Ry(180-bodyYaw).
      *
-     * Our Ry(theta) convention means:
-     * theta = yaw_rad - PI
+     * Our Ry(theta) convention uses the same angle as vanilla:
+     * theta = PI - yaw_rad
      */
     float s = sin(inst.rotationY);
     float c = cos(inst.rotationY);

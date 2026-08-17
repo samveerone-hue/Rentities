@@ -2,6 +2,7 @@ package me.balancinglight.rentities.mixin.minecraft;
 
 import me.balancinglight.rentities.Rentities;
 import me.balancinglight.rentities.entities.EntityBatchRenderer;
+import me.balancinglight.rentities.entities.EntityMeshBaker;
 import me.balancinglight.rentities.entities.EntityBatchRegistry;
 import me.balancinglight.rentities.entities.EntityAnimationCategory;
 import me.balancinglight.rentities.entities.EntityDirectExtractor;
@@ -58,11 +59,13 @@ public abstract class MixinEntityRenderDispatcher {
         EntityBatchRenderer renderer = EntityBatchRenderer.INSTANCE;
 
         if (renderer != null && !renderer.hasMeshFor(type)) {
-            if (!Rentities.config.entity_scan_mode) {
-                EntityBatchRenderer.queueErrorEntity(x, y, z);
-                ci.cancel();
+            EntityMeshBaker.MeshStatus status = renderer.getMeshBaker().ensureMeshFor(type);
+
+            // UNKNOWN/BUILDING means extraction is not ready yet. Let vanilla render this
+            // frame; the retry/backoff in the baker will attempt extraction again later.
+            if (status != EntityMeshBaker.MeshStatus.READY || !renderer.hasMeshFor(type)) {
+                return;
             }
-            return;
         }
 
         if (renderer != null && !renderer.entityTextureLocs.containsKey(type)

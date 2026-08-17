@@ -294,13 +294,31 @@ public class EntityBatchRenderer {
 
         if (storedViewProjection == null || entityShader == null) return;
 
-        // Sorted-order copy straight into the mapped slot.
+        // Sorted-order copy straight into the mapped slot. The contiguous run index is
+        // also written into the existing texture-layer slot so the culling shader can
+        // address its DrawGroup directly without a per-instance binary search.
         long slotAddr = instanceRing.addrOf(bufIdx);
+        EntityType<?> previousType = null;
+        int groupIndex = -1;
+        var meshInfoMap = meshBaker.getMeshInfoMap();
         for (int i = 0; i < count; i++) {
             int originalIdx = queuedOriginalIndices[i];
-            MemoryUtil.memCopy(extractionBuffer + (long)originalIdx * EntityInstance.STRIDE,
-                               slotAddr + (long)i * EntityInstance.STRIDE,
-                               EntityInstance.STRIDE);
+            EntityType<?> currentType = extractionTypes[originalIdx];
+            if (currentType != previousType) {
+                previousType = currentType;
+                if (currentType != null && meshInfoMap.containsKey(currentType)) {
+                    groupIndex++;
+                }
+            }
+            long dst = slotAddr + (long)i * EntityInstance.STRIDE;
+            MemoryUtil.memCopy(
+                    extractionBuffer + (long)originalIdx * EntityInstance.STRIDE,
+                    dst,
+                    EntityInstance.STRIDE);
+            MemoryUtil.memPutInt(
+                    dst + EntityInstance.OFFSET_GROUP_INDEX,
+                    (currentType != null && meshInfoMap.containsKey(currentType))
+                            ? groupIndex : -1);
         }
 
         stateGuard.capture();
@@ -838,7 +856,7 @@ public class EntityBatchRenderer {
                 float yawODeg = (float) invokeAccessor(acc.yawO, state);
                 yawDeg = net.minecraft.util.Mth.rotLerp(partialTick, yawODeg, yawDeg);
             }
-            float rotY = (float)(Math.toRadians(yawDeg) - Math.PI);
+            float rotY = (float)Math.toRadians(180.0f - yawDeg);
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ROTATION_Y, rotY);
 
             EntityType<?> type = acc.type != null ? (EntityType<?>) invokeAccessor(acc.type, state) : null;
@@ -1027,6 +1045,10 @@ public class EntityBatchRenderer {
 
     public boolean hasMeshFor(EntityType<?> type) {
         return meshBaker.getMeshInfoMap().containsKey(type);
+    }
+
+    public EntityMeshBaker getMeshBaker() {
+        return meshBaker;
     }
 
     public void reloadShaders() {

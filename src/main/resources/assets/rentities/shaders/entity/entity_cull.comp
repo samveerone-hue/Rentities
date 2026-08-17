@@ -19,6 +19,7 @@ layout(local_size_x = 128) in;
 #define FIELD_POS_Y     1
 #define FIELD_POS_Z     2
 #define FIELD_FLAGS     14   // EntityInstance.OFFSET_FLAGS / 4
+#define FIELD_GROUP_INDEX 23 // EntityInstance.OFFSET_GROUP_INDEX / 4
 #define FLAG_IS_INVISIBLE 64
 
 layout(std430, binding = 12) readonly buffer EntityInstanceBuffer { float rawInstances[]; };
@@ -51,19 +52,8 @@ uniform vec4 uFrustumPlanes[6];
 uniform uint uGroupCount;
 uniform uint uInstanceCount;
 
-// groups[] is ordered by firstInstance, so the owning group of an instance is a binary
-// search over a handful of entries — cheaper than a second dispatch dimension, which would
-// pad every group out to the largest group's size.
-uint findGroup(uint instanceIndex) {
-    uint lo = 0u;
-    uint hi = uGroupCount - 1u;
-    while (lo < hi) {
-        uint mid = (lo + hi + 1u) / 2u;
-        if (groups[mid].firstInstance <= instanceIndex) lo = mid; else hi = mid - 1u;
-    }
-    return lo;
-}
-
+// Each instance carries its owning group index in the instance payload, so culling can
+// address the group directly without reconstructing ownership with a binary search.
 bool insideFrustum(vec3 centre, float radius) {
     for (int i = 0; i < 6; ++i) {
         if (dot(uFrustumPlanes[i].xyz, centre) + uFrustumPlanes[i].w < -radius) return false;
@@ -75,14 +65,15 @@ void main() {
     uint instanceIndex = gl_GlobalInvocationID.x;
     if (instanceIndex >= uInstanceCount || uGroupCount == 0u) return;
 
-    uint g = findGroup(instanceIndex);
+    uint base = instanceIndex * uint(INSTANCE_FLOATS);
+    uint g = uint(floatBitsToInt(rawInstances[base + uint(FIELD_GROUP_INDEX)]));
+    if (g >= uGroupCount) return;
     DrawGroup group = groups[g];
     // Instances of a type with no baked mesh are never given a group, so an index can land
     // outside every group's range; those must not be drawn as part of a neighbouring group.
     if (instanceIndex < group.firstInstance
         || instanceIndex >= group.firstInstance + group.instanceCount) return;
 
-    uint base = instanceIndex * uint(INSTANCE_FLOATS);
     int flags = floatBitsToInt(rawInstances[base + uint(FIELD_FLAGS)]);
     if ((flags & FLAG_IS_INVISIBLE) != 0) return;
 

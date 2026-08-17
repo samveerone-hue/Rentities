@@ -3,6 +3,7 @@ package me.balancinglight.rentities.entities;
 import net.minecraft.world.entity.EntityType;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Collections;
 
 public final class EntityBatchRegistry {
 
@@ -122,7 +123,7 @@ public final class EntityBatchRegistry {
     }
 
     public static java.util.Set<EntityType<?>> REGISTRY_TYPES() {
-        return REGISTRY.keySet();
+        return Collections.unmodifiableSet(REGISTRY.keySet());
     }
 
     private static void reg(EntityType<?> type, EntityAnimationCategory category) {

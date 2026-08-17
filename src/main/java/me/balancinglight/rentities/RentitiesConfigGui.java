@@ -54,45 +54,6 @@ public class RentitiesConfigGui implements ConfigEntryPoint {
                 .setStorageHandler(noSave) // already saved manually above
         );
 
-        page.addOption(
-            builder.createBooleanOption(Identifier.parse("rentities:gpu_culling"))
-                .setName(Component.literal("GPU Entity Culling"))
-                .setTooltip(Component.literal(
-                    "Uses the compute/indirect culling path. Disabled by default because " +
-                    "the CPU-instanced path is the correctness fallback when camera/frustum " +
-                    "state is not runtime-validated."))
-                .setDefaultValue(false)
-                .setImpact(OptionImpact.HIGH)
-                .setEnabledProvider(c -> Rentities.IS_COMPATIBLE)
-                .setBinding(
-                    value -> {
-                        store.getData().entity_gpu_culling_enabled = value;
-                        store.save();
-                    },
-                    () -> store.getData().entity_gpu_culling_enabled
-                )
-                .setStorageHandler(noSave)
-        );
-
-        page.addOption(
-            builder.createBooleanOption(Identifier.parse("rentities:animation_lod"))
-                .setName(Component.literal("Fast Animation LOD"))
-                .setTooltip(Component.literal(
-                    "Reduces animation work/effect at distance. Near: full animation; " +
-                    "medium: scaled animation; far: static pose."))
-                .setDefaultValue(true)
-                .setImpact(OptionImpact.HIGH)
-                .setEnabledProvider(c -> Rentities.IS_COMPATIBLE)
-                .setBinding(
-                    value -> {
-                        store.getData().fast_animation_lod_enabled = value;
-                        store.save();
-                    },
-                    () -> store.getData().fast_animation_lod_enabled
-                )
-                .setStorageHandler(noSave)
-        );
-
         // Scan mode — needs reload to take effect (changes what happens at world load)
         page.addOption(
             builder.createBooleanOption(Identifier.parse("rentities:scan_mode"))
@@ -139,7 +100,7 @@ public class RentitiesConfigGui implements ConfigEntryPoint {
                 .setImpact(OptionImpact.HIGH)
                 .setEnabledProvider(c -> EntityMeshBaker.cacheExists())
                 .setBinding(
-                    value -> { if (value) EntityMeshBaker.deleteCache(); },
+                    value -> { if (value) { EntityMeshBaker.deleteCache(); EntityMeshBaker.deleteTextureCache(); } },
                     () -> false
                 )
                 .setStorageHandler(noSave)

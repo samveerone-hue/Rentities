@@ -5,7 +5,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.entity.ArmorStandRenderer;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.state.ArmorStandRenderState;
-import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.core.Rotations;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.entity.Entity;
@@ -89,21 +88,7 @@ public final class EntityDirectExtractor {
         EntityType<?> type = entity.getType();
         if (EntityBatchRegistry.getCategory(type) == EntityAnimationCategory.CPU_ANIMATED) return false;
         if (!renderer.hasMeshFor(type)) return false;
-
-        Object textureLoc;
-        if (entity instanceof AbstractClientPlayer clientPlayer) {
-            if (isSlimPlayer(clientPlayer)) {
-                // One mesh per entity type is shared by the batcher. The wide and slim player
-                // models have different arm geometry, so slim players stay on vanilla until a
-                // second player-model mesh variant is introduced.
-                return false;
-            }
-            textureLoc = resolvePlayerSkinLocation(clientPlayer);
-            if (textureLoc == null) return false;
-        } else {
-            textureLoc = renderer.entityTextureLocs.get(type);
-            if (textureLoc == null) return false;
-        }
+        if (!renderer.entityTextureLocs.containsKey(type)) return false;
 
         /*
          * The current GPU mesh path deliberately bakes only the entity itself.
@@ -121,74 +106,14 @@ public final class EntityDirectExtractor {
             return false;
         }
 
-        long ptr = EntityBatchRenderer.reserveInstance(type, textureLoc);
+        long ptr = EntityBatchRenderer.reserveInstance(type);
         if (ptr == 0L) return false;
 
-        if (!write(ptr, entity, type, partialTick)) {
-            EntityBatchRenderer.releaseReservedInstance(type);
-            return false;
-        }
+        write(ptr, entity, type, partialTick);
         return true;
     }
 
-    private static Object resolvePlayerSkinLocation(AbstractClientPlayer player) {
-        try {
-            Object skin = invokeNoArg(player, "getSkin", "getSkinTextures", "method_52814");
-            if (skin == null) return null;
-            Object body = invokeNoArg(skin, "body");
-            if (body == null) return null;
-            Object texturePath = invokeNoArg(body, "texturePath");
-            if (texturePath != null) return texturePath;
-            return invokeNoArg(body, "id");
-        } catch (Throwable t) {
-            if (Rentities.IS_DEBUG) {
-                Rentities.LOGGER.warn("[Rentities] Failed to resolve player skin for {}: {}", player.getUUID(), t.getMessage());
-            }
-            return null;
-        }
-    }
-
-    private static boolean isSlimPlayer(AbstractClientPlayer player) {
-        try {
-            Object skin = invokeNoArg(player, "getSkin", "getSkinTextures", "method_52814");
-            Object model = skin == null ? null : invokeNoArg(skin, "model");
-            return model != null && model.toString().toLowerCase(java.util.Locale.ROOT).contains("slim");
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private static Object invokeNoArg(Object target, String... names) throws Exception {
-        Class<?> c = target.getClass();
-        while (c != null && c != Object.class) {
-            for (String name : names) {
-                try {
-                    java.lang.reflect.Method m = c.getDeclaredMethod(name);
-                    m.setAccessible(true);
-                    return m.invoke(target);
-                } catch (NoSuchMethodException ignored) {}
-            }
-            c = c.getSuperclass();
-        }
-        for (String name : names) {
-            try { return target.getClass().getMethod(name).invoke(target); }
-            catch (NoSuchMethodException ignored) {}
-        }
-        return null;
-    }
-
-    private static boolean write(long ptr, Entity entity, EntityType<?> type, float partialTick) {
-        try {
-            return writeInternal(ptr, entity, type, partialTick);
-        } catch (Throwable t) {
-            if (Rentities.IS_DEBUG) {
-                Rentities.LOGGER.warn("[Rentities] Direct entity extraction failed for {}: {}", type, t.getMessage());
-            }
-            return false;
-        }
-    }
-
-    private static boolean writeInternal(long ptr, Entity entity, EntityType<?> type, float partialTick) {
+    private static void write(long ptr, Entity entity, EntityType<?> type, float partialTick) {
         Vec3 pos = entity.getPosition(partialTick);
 
         MemoryUtil.memPutFloat(
@@ -475,7 +400,7 @@ public final class EntityDirectExtractor {
                 EntityBatchRegistry.getCategory(type).glslId);
 
         MemoryUtil.memPutInt(
-                ptr + EntityInstance.OFFSET_GROUP_INDEX,
+                ptr + EntityInstance.OFFSET_TEXTURE_LAYER,
                 0);
 
         /*
@@ -541,8 +466,6 @@ public final class EntityDirectExtractor {
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_TEX_SCALE_Y,
                 1f);
-
-        return true;
     }
 
     /**

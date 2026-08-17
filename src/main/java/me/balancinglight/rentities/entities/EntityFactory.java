@@ -5,6 +5,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
@@ -16,19 +17,6 @@ public class EntityFactory {
     public static Entity getOrCreateDummy(EntityType<?> type) {
         if (type == null) return null;
         return DUMMY_CACHE.computeIfAbsent(type, EntityFactory::createDummy);
-    }
-
-    private static Object findPreferredSpawnReason(Class<?> enumType) {
-        if (!enumType.isEnum()) return null;
-        Object[] constants = enumType.getEnumConstants();
-        if (constants == null) return null;
-        String[] preferred = {"COMMAND", "MOB_SUMMONED", "NATURAL", "STRUCTURE"};
-        for (String name : preferred) {
-            for (Object constant : constants) {
-                if (((Enum<?>) constant).name().equals(name)) return constant;
-            }
-        }
-        return null;
     }
 
     private static Entity createDummy(EntityType<?> type) {
@@ -43,14 +31,11 @@ public class EntityFactory {
                         return (Entity) m.invoke(type, level);
                     }
                     if (m.getParameterCount() == 2 && m.getParameterTypes()[0].isAssignableFrom(level.getClass())) {
-                        // Prefer a semantically safe spawn reason instead of relying on enum ordinal.
-                        Class<?> reasonType = m.getParameterTypes()[1];
-                        if (reasonType.isEnum()) {
-                            Object reason = findPreferredSpawnReason(reasonType);
-                            if (reason != null) {
-                                return (Entity) m.invoke(type, level, reason);
-                            }
-                        }
+                        // Likely Level + EntitySpawnReason (enum)
+                        Object[] args = new Object[2];
+                        args[0] = level;
+                        args[1] = m.getParameterTypes()[1].getEnumConstants()[0]; // Just use first enum constant
+                        return (Entity) m.invoke(type, args);
                     }
                 } catch (Exception ignored) {}
             }

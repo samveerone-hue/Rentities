@@ -5,7 +5,6 @@ import me.balancinglight.rentities.gl.GlShader;
 import me.balancinglight.rentities.gl.GlStateGuard;
 import me.balancinglight.rentities.gl.GpuFenceRing;
 import me.balancinglight.rentities.gl.GpuRingBuffer;
-import me.balancinglight.rentities.gl.GlStateCache;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.EntityType;
 import org.joml.Matrix4f;
@@ -17,8 +16,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.lwjgl.opengl.GL11C.*;
+import static org.lwjgl.opengl.GL13C.GL_ACTIVE_TEXTURE;
 import static org.lwjgl.opengl.GL13C.GL_TEXTURE0;
 import static org.lwjgl.opengl.GL13C.glActiveTexture;
+import static org.lwjgl.opengl.GL20C.glGetUniformLocation;
 import static org.lwjgl.opengl.GL20C.glUniform1f;
 import static org.lwjgl.opengl.GL20C.glUniform1i;
 import static org.lwjgl.opengl.GL20C.glUniformMatrix4fv;
@@ -55,14 +56,13 @@ public class EntityBatchRenderer {
     private static final int MAX_QUEUE = EntityInstance.MAX_INSTANCES;
     private static final EntityType<?>[] queuedTypes = new EntityType[MAX_QUEUE];
     private static final EntityType<?>[] extractionTypes = new EntityType[MAX_QUEUE];
-    private static final Object[] extractionTextureLocs = new Object[MAX_QUEUE];
-    private static final int[] extractionTextureIds = new int[MAX_QUEUE];
     private static final int[] queuedOriginalIndices = new int[MAX_QUEUE];
     private static final AtomicInteger queueSize = new AtomicInteger(0);
     private static long extractionBuffer;
 
     // Stored VP matrix from terrain render pass
     public static org.joml.Matrix4f storedViewProjection;
+    private boolean textureCacheLoaded = false;
     private boolean passPrepared = false;
     private int lastBoundGlTexId = 0;
 
@@ -81,14 +81,12 @@ public class EntityBatchRenderer {
     private static final int SSBO_BINDING = 12;
     private static final int PIVOT_SSBO_BINDING = 13;
 
-    private final GlStateCache glStateCache = new GlStateCache();
     private final GlStateGuard stateGuard = new GlStateGuard(
             SSBO_BINDING,
             PIVOT_SSBO_BINDING,
             EntityCullingPipeline.GROUP_SSBO_BINDING,
             EntityCullingPipeline.CMD_SSBO_BINDING,
-            EntityCullingPipeline.VISIBLE_SSBO_BINDING,
-            EntityCullingPipeline.FAST_ANIMATION_SSBO_BINDING);
+            EntityCullingPipeline.VISIBLE_SSBO_BINDING);
     private int currentBufferIdx = 0;
 
     private GlShader entityShader;
@@ -97,14 +95,11 @@ public class EntityBatchRenderer {
     private int uEntityTextures = -1; // sampler2D uEntityTexture — bound per draw call
     private int uBaseInstance  = -1;
     private int uIndirect      = -1;
-    private int uFastAnimation = -1;
-    private int uAnimationLodEnabled = -1;
-    private int uAnimationLodMediumDistance = -1;
-    private int uAnimationLodFarDistance = -1;
-    private int uAnimationLodMediumScale = -1;
 
     private final EntityMeshBaker meshBaker;
     private final EntityErrorRenderer errorRenderer;
+    private final EntityTextureAtlas textureAtlas;
+    private final EntitySkinCache skinCache;
 
     private static final Map<Class<?>, Map<String, Field>> fieldCache = new ConcurrentHashMap<>();
 
@@ -120,14 +115,18 @@ public class EntityBatchRenderer {
     public final java.util.Map<EntityType<?>, Object> entityTextureLocs = new ConcurrentHashMap<>();
     public final java.util.Map<EntityType<?>, Integer> entityGlTexIds = new ConcurrentHashMap<>();
     public final java.util.Set<EntityType<?>> entityTexFailed = java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
-    private final java.util.Map<String, Integer> textureKeyIds = new ConcurrentHashMap<>();
-    private final AtomicInteger nextTextureKeyId = new AtomicInteger(1);
 
+    // Cached TextureManager method for binding textures - resolved once at first use
+    private java.lang.reflect.Method cachedBindTexMethod = null;
+    private java.lang.reflect.Method cachedGetTexMethod = null;
+    private Object cachedTextureManager = null;
 
     public EntityBatchRenderer() {
         INSTANCE = this;
         this.meshBaker = new EntityMeshBaker();
         this.errorRenderer = new EntityErrorRenderer();
+        this.textureAtlas = new EntityTextureAtlas();
+        this.skinCache = new EntitySkinCache();
 
         // One immutable allocation, three slots, mapped once for the lifetime of the mod.
         // No GL_CLIENT_STORAGE_BIT: that pins system RAM and pushes the driver towards a
@@ -137,19 +136,6 @@ public class EntityBatchRenderer {
 
         extractionBuffer = MemoryUtil.nmemAlloc(EntityInstance.SSBO_SIZE);
         compileShader();
-    }
-
-    private int textureKeyId(Object loc) {
-        if (loc == null) return 0;
-        return textureKeyIds.computeIfAbsent(String.valueOf(loc), k -> nextTextureKeyId.getAndIncrement());
-    }
-
-    private static void clearQueueSlot(int idx) {
-        queuedTypes[idx] = null;
-        extractionTypes[idx] = null;
-        extractionTextureLocs[idx] = null;
-        extractionTextureIds[idx] = 0;
-        queuedOriginalIndices[idx] = 0;
     }
 
     public static boolean queueEntityStateDirect(Object state, double x, double y, double z,
@@ -170,13 +156,12 @@ public class EntityBatchRenderer {
         queuedOriginalIndices[idx] = idx;
         if (!INSTANCE.writeEntityInstance(
                 extractionBuffer + (long) idx * EntityInstance.STRIDE, state, x, y, z)) {
-            clearQueueSlot(idx);
+            queuedTypes[idx] = null;
+            extractionTypes[idx] = null;
+            queuedOriginalIndices[idx] = 0;
             queueSize.decrementAndGet();
             return false;
         }
-        Object directLoc = INSTANCE.entityTextureLocs.get(type);
-        extractionTextureLocs[idx] = directLoc;
-        extractionTextureIds[idx] = INSTANCE.textureKeyId(directLoc);
         return true;
     }
 
@@ -199,35 +184,8 @@ public class EntityBatchRenderer {
         }
         queuedTypes[idx] = type;
         extractionTypes[idx] = type;
-        extractionTextureLocs[idx] = INSTANCE.entityTextureLocs.get(type);
-        extractionTextureIds[idx] = INSTANCE.textureKeyId(extractionTextureLocs[idx]);
         queuedOriginalIndices[idx] = idx;
         return extractionBuffer + (long) idx * EntityInstance.STRIDE;
-    }
-
-    public static long reserveInstance(EntityType<?> type, Object textureLoc) {
-        if (INSTANCE == null) return 0L;
-        int idx = queueSize.getAndIncrement();
-        if (idx >= MAX_QUEUE) {
-            queueSize.decrementAndGet();
-            return 0L;
-        }
-        queuedTypes[idx] = type;
-        extractionTypes[idx] = type;
-        extractionTextureLocs[idx] = textureLoc;
-        extractionTextureIds[idx] = INSTANCE.textureKeyId(textureLoc);
-        queuedOriginalIndices[idx] = idx;
-        return extractionBuffer + (long) idx * EntityInstance.STRIDE;
-    }
-
-    /** Rolls back the most recently reserved queue slot when direct extraction fails. */
-    public static void releaseReservedInstance(EntityType<?> type) {
-        int idx = queueSize.get();
-        if (idx <= 0) return;
-        int slot = idx - 1;
-        if (queuedTypes[slot] != type || extractionTypes[slot] != type) return;
-        clearQueueSlot(slot);
-        queueSize.decrementAndGet();
     }
 
     public static boolean queueEntityState(Object state, double x, double y, double z) {
@@ -258,14 +216,13 @@ public class EntityBatchRenderer {
                 x,
                 y,
                 z)) {
-            clearQueueSlot(idx);
+            queuedTypes[idx] = null;
+            extractionTypes[idx] = null;
+            queuedOriginalIndices[idx] = 0;
             queueSize.decrementAndGet();
             return false;
         }
 
-        Object stateLoc = INSTANCE.entityTextureLocs.get(type);
-        extractionTextureLocs[idx] = stateLoc;
-        extractionTextureIds[idx] = INSTANCE.textureKeyId(stateLoc);
         return true;
     }
 
@@ -320,27 +277,36 @@ public class EntityBatchRenderer {
         int bufIdx = currentBufferIdx;
         fenceRing.waitFor(bufIdx);
 
-        if (storedViewProjection == null || entityShader == null) {
-            for (int i = 0; i < count; i++) clearQueueSlot(queuedOriginalIndices[i]);
-            return;
+        textureAtlas.processUploads();
+        skinCache.processUploads();
+
+        if (meshBaker.pendingTextureSave) {
+            meshBaker.pendingTextureSave = false;
+            textureAtlas.saveTextureCache();
         }
+
+        if (!textureCacheLoaded) {
+            textureCacheLoaded = true;
+            if (!Rentities.config.entity_scan_mode) {
+                textureAtlas.loadTextureCache();
+            }
+        }
+
+        if (storedViewProjection == null || entityShader == null) return;
 
         // Sorted-order copy straight into the mapped slot. The contiguous run index is
         // also written into the existing texture-layer slot so the culling shader can
         // address its DrawGroup directly without a per-instance binary search.
         long slotAddr = instanceRing.addrOf(bufIdx);
         EntityType<?> previousType = null;
-        int previousTextureId = -1;
         int groupIndex = -1;
         var meshInfoMap = meshBaker.getMeshInfoMap();
         for (int i = 0; i < count; i++) {
             int originalIdx = queuedOriginalIndices[i];
             EntityType<?> currentType = extractionTypes[originalIdx];
-            int currentTextureId = extractionTextureIds[originalIdx];
-            if (currentType != previousType || currentTextureId != previousTextureId) {
+            if (currentType != previousType) {
                 previousType = currentType;
-                previousTextureId = currentTextureId;
-                if (currentType != null && meshInfoMap.containsKey(currentType) && currentTextureId != 0) {
+                if (currentType != null && meshInfoMap.containsKey(currentType)) {
                     groupIndex++;
                 }
             }
@@ -351,17 +317,14 @@ public class EntityBatchRenderer {
                     EntityInstance.STRIDE);
             MemoryUtil.memPutInt(
                     dst + EntityInstance.OFFSET_GROUP_INDEX,
-                    (currentType != null
-                            && meshInfoMap.containsKey(currentType)
-                            && currentTextureId != 0)
+                    (currentType != null && meshInfoMap.containsKey(currentType))
                             ? groupIndex : -1);
         }
 
         stateGuard.capture();
-        glStateCache.reset();
         try {
             // Bind shader and upload uniforms
-            glStateCache.useProgram(entityShader.id);
+            entityShader.bind();
             float[] vp = vpFloats;
             if (storedViewProjection != null) storedViewProjection.get(vp);
             glUniformMatrix4fv(uViewProjection, false, vp);
@@ -421,7 +384,7 @@ public class EntityBatchRenderer {
             // Bind VAO and draw
             int vaoId = meshBaker.getVaoId();
             if (vaoId != 0) {
-                glStateCache.bindVertexArray(vaoId);
+                glBindVertexArray(vaoId);
             
                 // Ensure correct GL state for entity rendering
                 glEnable(GL_DEPTH_TEST);
@@ -441,23 +404,13 @@ public class EntityBatchRenderer {
 
                 lastBoundGlTexId = 0;
 
-                glUniform1i(uAnimationLodEnabled, Rentities.config.fast_animation_lod_enabled ? 1 : 0);
-                glUniform1f(uAnimationLodMediumDistance, Math.max(1.0f, Rentities.config.fast_animation_lod_medium_distance));
-                float lodMedium = Math.max(1.0f, Rentities.config.fast_animation_lod_medium_distance);
-                float lodFar = Math.max(lodMedium + 1.0f, Rentities.config.fast_animation_lod_far_distance);
-                glUniform1f(uAnimationLodFarDistance, lodFar);
-                glUniform1f(uAnimationLodMediumScale, Math.max(0.0f, Math.min(1.0f, Rentities.config.fast_animation_lod_medium_scale)));
-
-                boolean indirect = Rentities.config.entity_gpu_culling_enabled
-                        && cullPipeline.isAvailable()
-                        && storedViewProjection != null;
+                boolean indirect = cullPipeline.isAvailable() && storedViewProjection != null;
                 if (indirect) {
                     indirect = renderIndirect(count, bufIdx);
                 }
                 if (!indirect) {
-                    glStateCache.useProgram(entityShader.id);
+                    glUseProgram(entityShader.id);
                     glUniform1i(uIndirect, 0);
-                    glUniform1i(uFastAnimation, 0);
                     renderBySortedEntityType(count);
                 }
 
@@ -480,8 +433,8 @@ public class EntityBatchRenderer {
 
         // Clear queued references
         for (int i = 0; i < count; i++) {
-            int original = queuedOriginalIndices[i];
-            if (original >= 0 && original < MAX_QUEUE) clearQueueSlot(original);
+            queuedTypes[i] = null;
+            extractionTypes[i] = null;
         }
     }
 
@@ -495,15 +448,11 @@ public class EntityBatchRenderer {
         for (int i = 0; i < count; i++) {
             EntityType<?> type = queuedTypes[i];
             int typeIdx = type != null ? EntityBatchRegistry.getEntityTypeIndex(type) : 0;
-            int textureId = extractionTextureIds[queuedOriginalIndices[i]] & 0xFFFFF;
-            int original = queuedOriginalIndices[i] & 0xFFFF;
-            sortKeys[i] = ((long) (typeIdx & 0x0FFFFFFF) << 36)
-                    | ((long) textureId << 16)
-                    | (original & 0xFFFFL);
+            sortKeys[i] = ((long) typeIdx << 32) | (queuedOriginalIndices[i] & 0xFFFFFFFFL);
         }
         java.util.Arrays.sort(sortKeys, 0, count);
         for (int i = 0; i < count; i++) {
-            int originalIdx = (int) (sortKeys[i] & 0xFFFFL);
+            int originalIdx = (int) (sortKeys[i] & 0xFFFFFFFFL);
             queuedOriginalIndices[i] = originalIdx;
         }
         for (int i = 0; i < count; i++) {
@@ -517,7 +466,6 @@ public class EntityBatchRenderer {
 
     private static final int MAX_DRAW_GROUPS = 256;
     private final EntityType<?>[] groupTypes = new EntityType[MAX_DRAW_GROUPS];
-    private final Object[] groupTextureLocs = new Object[MAX_DRAW_GROUPS];
 
     private boolean renderIndirect(int count, int bufIdx) {
         var meshInfoMap = meshBaker.getMeshInfoMap();
@@ -525,13 +473,11 @@ public class EntityBatchRenderer {
 
         int runStart = 0;
         for (int i = 1; i <= count; i++) {
-            if (i < count && queuedTypes[i] == queuedTypes[runStart]
-                    && extractionTextureIds[queuedOriginalIndices[i]] == extractionTextureIds[queuedOriginalIndices[runStart]]) continue;
+            if (i < count && queuedTypes[i] == queuedTypes[runStart]) continue;
 
             EntityType<?> type = queuedTypes[runStart];
-            Object textureLoc = extractionTextureLocs[queuedOriginalIndices[runStart]];
             var meshInfo = type != null ? meshInfoMap.get(type) : null;
-            if (meshInfo != null && textureLoc != null) {
+            if (meshInfo != null) {
                 int g = cullPipeline.addGroup(meshInfo.indexCount, meshInfo.indexOffset,
                         runStart, i - runStart, type);
                 if (g < 0) {
@@ -549,7 +495,6 @@ public class EntityBatchRenderer {
                     return false;
                 }
                 groupTypes[g] = type;
-                groupTextureLocs[g] = extractionTextureLocs[queuedOriginalIndices[runStart]];
             }
             runStart = i;
         }
@@ -559,18 +504,17 @@ public class EntityBatchRenderer {
 
         cullPipeline.dispatch(count, storedViewProjection);
 
-        glStateCache.useProgram(entityShader.id);
+        glUseProgram(entityShader.id);
         glUniform1i(uIndirect, 1);
-        glUniform1i(uFastAnimation, 0);
         cullPipeline.bindForDraw();
 
         int runFirst = 0;
-        Object runLoc = groupTextureLocs[0];
+        Object runLoc = entityTextureLocs.get(groupTypes[0]);
         for (int g = 1; g <= groups; g++) {
-            Object loc = g < groups ? groupTextureLocs[g] : null;
+            Object loc = g < groups ? entityTextureLocs.get(groupTypes[g]) : null;
             if (g < groups && java.util.Objects.equals(loc, runLoc)) continue;
 
-            bindTextureLocation(runLoc);
+            bindEntityTexture(groupTypes[runFirst]);
             glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT,
                     cullPipeline.indirectOffset(runFirst), g - runFirst,
                     EntityCullingPipeline.CMD_STRIDE);
@@ -578,7 +522,7 @@ public class EntityBatchRenderer {
             runLoc = loc;
         }
 
-        for (int g = 0; g < groups; g++) { groupTypes[g] = null; groupTextureLocs[g] = null; }
+        for (int g = 0; g < groups; g++) groupTypes[g] = null;
         return true;
     }
 
@@ -586,13 +530,11 @@ public class EntityBatchRenderer {
         var meshInfoMap = meshBaker.getMeshInfoMap();
         int instanceOffset = 0;
         EntityType<?> currentType = null;
-        int currentTextureId = -1;
         int currentCount = 0;
 
         for (int i = 0; i <= count; i++) {
             EntityType<?> type = (i < count) ? queuedTypes[i] : null;
-            int textureId = (i < count) ? extractionTextureIds[queuedOriginalIndices[i]] : -1;
-            if (type != currentType || textureId != currentTextureId) {
+            if (type != currentType) {
                 if (currentType != null && currentCount > 0) {
                     var meshInfo = meshInfoMap.get(currentType);
                     if (meshInfo != null) {
@@ -613,7 +555,6 @@ public class EntityBatchRenderer {
                     instanceOffset += currentCount;
                 }
                 currentType = type;
-                currentTextureId = textureId;
                 currentCount = 1;
             } else {
                 currentCount++;
@@ -774,35 +715,126 @@ public class EntityBatchRenderer {
         @Override protected StateAccessor computeValue(Class<?> type) { return new StateAccessor(type); }
     };
 
-    /** Binds the resolved texture location to unit 0; returns true on success. */
-    private boolean bindEntityTexture(EntityType<?> type) {
-        Object loc = type == null ? null : entityTextureLocs.get(type);
-        return bindTextureLocation(loc);
+    private void ensureTexMethodsCached() {
+        if (cachedTextureManager != null) return;
+        try {
+            var mc = Minecraft.getInstance();
+            if (mc == null) return;
+            var tm = mc.getTextureManager();
+            if (tm == null) return;
+            cachedTextureManager = tm;
+        } catch (Exception e) {
+            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("ensureTexMethodsCached failed: {}", e.getMessage());
+        }
     }
 
-    private boolean bindTextureLocation(Object loc) {
+    private void resolveTexMethods(Object loc) {
+        if (cachedBindTexMethod != null && cachedGetTexMethod != null) return;
+        if (cachedTextureManager == null) return;
+        try {
+            String[] bindNames = {"method_4615", "bindTexture"};
+            String[] getNames  = {"method_4619", "getTexture", "method_4620"};
+            for (java.lang.reflect.Method m : cachedTextureManager.getClass().getMethods()) {
+                if (m.getParameterCount() != 1) continue;
+                if (!m.getParameterTypes()[0].isAssignableFrom(loc.getClass())) continue;
+                String name = m.getName();
+                for (String n : bindNames) if (n.equals(name)) { cachedBindTexMethod = m; break; }
+                for (String n : getNames)  if (n.equals(name)) { cachedGetTexMethod  = m; break; }
+            }
+            if (Rentities.IS_DEBUG)
+                Rentities.LOGGER.info("Resolved tex methods: bind={} get={}",
+                    cachedBindTexMethod != null ? cachedBindTexMethod.getName() : "null",
+                    cachedGetTexMethod  != null ? cachedGetTexMethod.getName()  : "null");
+        } catch (Exception e) {
+            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("resolveTexMethods failed: {}", e.getMessage());
+        }
+    }
+
+    /** Binds the entity type's texture to unit 0; returns true on success. */
+    private boolean bindEntityTexture(EntityType<?> type) {
+        if (type == null) return false;
+
+        Integer cached = entityGlTexIds.get(type);
+        if (cached != null && cached > 0) {
+            if (!glIsTexture(cached)) {
+                entityGlTexIds.remove(type);
+            } else {
+                bindTextureUnit0(cached);
+                return true;
+            }
+        }
+
+        Object loc = entityTextureLocs.get(type);
         if (loc == null) {
             unbindTextureUnit0();
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.warn("[Rentities] No texture location for {}; unbinding unit 0", type);
+            }
             return false;
         }
+
         int glId = EntityGlTextureResolver.resolveGlId(loc);
-        if (glId > 0 && glIsTexture(glId)) {
+        if (glId > 0) {
+            entityGlTexIds.put(type, glId);
             bindTextureUnit0(glId);
             return true;
         }
+
+        ensureTexMethodsCached();
+        if (cachedTextureManager == null) {
+            unbindTextureUnit0();
+            return false;
+        }
+        resolveTexMethods(loc);
+        try {
+            if (cachedBindTexMethod != null)
+                cachedBindTexMethod.invoke(cachedTextureManager, loc);
+
+            if (cachedGetTexMethod != null) {
+                Object texObj = cachedGetTexMethod.invoke(cachedTextureManager, loc);
+                if (texObj != null) {
+                    Object gpuTex = null;
+                    for (java.lang.reflect.Method m : texObj.getClass().getMethods()) {
+                        if (m.getParameterCount() == 0
+                                && m.getReturnType().getSimpleName().equals("GpuTexture")) {
+                            gpuTex = m.invoke(texObj);
+                            break;
+                        }
+                    }
+                    if (gpuTex != null) {
+                        for (Field f : gpuTex.getClass().getDeclaredFields()) {
+                            if (f.getType() == int.class) {
+                                f.setAccessible(true);
+                                int id = f.getInt(gpuTex);
+                                if (id > 0 && glIsTexture(id)) {
+                                    entityGlTexIds.put(type, id);
+                                    bindTextureUnit0(id);
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("bindEntityTexture failed: {}", e.getMessage());
+        }
+        // Never reuse whatever texture is currently bound on unit 0.
         unbindTextureUnit0();
         return false;
     }
 
     /** Binds texture unit 0 to 0 so a stale entity texture can never be re-sampled. */
     private void unbindTextureUnit0() {
-        glStateCache.bindTextureUnit0(0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
         lastBoundGlTexId = 0;
     }
 
     private void bindTextureUnit0(int glId) {
         if (glId <= 0 || glId == lastBoundGlTexId) return;
-        glStateCache.bindTextureUnit0(glId);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, glId);
         glUniform1i(uEntityTextures, 0);
         lastBoundGlTexId = glId;
     }
@@ -928,7 +960,7 @@ public class EntityBatchRenderer {
             EntityAnimationCategory cat = type != null ? EntityBatchRegistry.getCategory(type) : EntityAnimationCategory.CPU_ANIMATED;
             MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ENTITY_TYPE,   typeIdx);
             MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ANIM_CATEGORY, cat.glslId);
-            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_GROUP_INDEX, 0);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_TEXTURE_LAYER, 0);
 
             MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_HELD_MAIN,       EntityInstance.NO_ITEM);
             MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_HELD_OFFHAND,    EntityInstance.NO_ITEM);
@@ -994,11 +1026,6 @@ public class EntityBatchRenderer {
             uEntityTextures = entityShader.getUniformLocation("uEntityTexture");
             uBaseInstance   = entityShader.getUniformLocation("uBaseInstance");
             uIndirect       = entityShader.getUniformLocation("uIndirect");
-            uFastAnimation = entityShader.getUniformLocation("uFastAnimation");
-            uAnimationLodEnabled = entityShader.getUniformLocation("uAnimationLodEnabled");
-            uAnimationLodMediumDistance = entityShader.getUniformLocation("uAnimationLodMediumDistance");
-            uAnimationLodFarDistance = entityShader.getUniformLocation("uAnimationLodFarDistance");
-            uAnimationLodMediumScale = entityShader.getUniformLocation("uAnimationLodMediumScale");
             glUseProgram(0);
         } catch (Exception e) {
             Rentities.LOGGER.error("Entity shader compilation failed", e);
@@ -1030,7 +1057,6 @@ public class EntityBatchRenderer {
     }
 
     public void delete() {
-        EntityGlTextureResolver.invalidateCache();
         if (entityShader != null) entityShader.delete();
         fenceRing.deleteAll();
         instanceRing.delete();
@@ -1038,6 +1064,8 @@ public class EntityBatchRenderer {
         if (extractionBuffer != 0) MemoryUtil.nmemFree(extractionBuffer);
         meshBaker.delete();
         errorRenderer.delete();
+        textureAtlas.delete();
+        skinCache.delete();
         INSTANCE = null;
     }
 }

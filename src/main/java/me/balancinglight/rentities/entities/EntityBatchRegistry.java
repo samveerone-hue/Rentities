@@ -33,7 +33,7 @@ public final class EntityBatchRegistry {
         reg(EntityType.SNOW_GOLEM,          EntityAnimationCategory.BIPED);
         reg(EntityType.ENDERMAN,            EntityAnimationCategory.BIPED);
         reg(EntityType.CREAKING,            EntityAnimationCategory.BIPED);
-        reg(EntityType.PLAYER,             EntityAnimationCategory.BIPED);
+        // Player handled separately via player batching path
 
         reg(EntityType.COW,                 EntityAnimationCategory.QUADRUPED);
         reg(EntityType.PIG,                 EntityAnimationCategory.QUADRUPED);

@@ -7,8 +7,6 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.Map;
 
 /**
  * Resolves OpenGL texture names from Minecraft {@code ResourceLocation} keys.
@@ -21,18 +19,11 @@ public final class EntityGlTextureResolver {
     private static Method getTexMethod = null;
     private static MethodHandle gpuTexGetter = null;
     private static MethodHandle gpuTexIdGetter = null;
-    private static final Map<String, Integer> GL_ID_CACHE = new ConcurrentHashMap<>();
 
     private EntityGlTextureResolver() {}
 
     public static int resolveGlId(Object loc) {
         if (loc == null) return 0;
-        final String key = String.valueOf(loc);
-        Integer cached = GL_ID_CACHE.get(key);
-        if (cached != null && cached > 0) {
-            if (org.lwjgl.opengl.GL11.glIsTexture(cached)) return cached;
-            GL_ID_CACHE.remove(key, cached);
-        }
         ensureMethods(loc);
         if (textureManager == null || bindTexMethod == null || getTexMethod == null) return 0;
 
@@ -42,16 +33,13 @@ public final class EntityGlTextureResolver {
             boundRequestedTexture = true;
 
             Object texObj = getTexMethod.invoke(textureManager, loc);
-            if (texObj != null) {
-                Object gpuTex = resolveGpuTexture(texObj);
-                if (gpuTex != null) {
-                    int glId = readGpuTexId(gpuTex);
-                    if (glId > 0) {
-                        GL_ID_CACHE.put(key, glId);
-                        return glId;
-                    }
-                }
-            }
+            if (texObj == null) return 0;
+
+            Object gpuTex = resolveGpuTexture(texObj);
+            if (gpuTex == null) return 0;
+
+            int glId = readGpuTexId(gpuTex);
+            if (glId > 0) return glId;
         } catch (Throwable t) {
             if (Rentities.IS_DEBUG) {
                 Rentities.LOGGER.warn("resolveGlId failed for {}: {}", loc, t.getMessage());
@@ -63,22 +51,6 @@ public final class EntityGlTextureResolver {
         // failed lookup render an unrelated texture left behind by another draw call.
         if (!boundRequestedTexture) return 0;
         return org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL11.GL_TEXTURE_BINDING_2D);
-    }
-
-    /** Drops all per-location GL id entries; call after a resource reload. */
-    public static void invalidateCache() {
-        GL_ID_CACHE.clear();
-        textureManager = null;
-        bindTexMethod = null;
-        getTexMethod = null;
-    }
-
-    /** Removes one location without disturbing unrelated entity textures. */
-    public static void invalidate(Object loc) {
-        if (loc != null) {
-            String key = String.valueOf(loc);
-            GL_ID_CACHE.remove(key);
-        }
     }
 
     private static void ensureMethods(Object loc) {
@@ -98,25 +70,8 @@ public final class EntityGlTextureResolver {
             if (bindTexMethod == null && (name.equals("method_4615") || name.equals("bindTexture"))) {
                 bindTexMethod = m;
             }
-            if (getTexMethod == null && (name.equals("method_4619") || name.equals("method_4620") || name.equals("getTexture"))) {
+            if (getTexMethod == null && (name.equals("method_4619") || name.equals("getTexture"))) {
                 getTexMethod = m;
-            }
-        }
-
-        // 1.21.11 has builds where the intermediary getter is exposed as method_4620.
-        // Keep a signature-based fallback so a remap/name change cannot make every
-        // batched entity sample texture 0 while the model geometry itself is valid.
-        if (getTexMethod == null) {
-            for (Method m : tm.getClass().getMethods()) {
-                if (m.getParameterCount() != 1 || !m.getParameterTypes()[0].isAssignableFrom(locClass)) continue;
-                Class<?> returnType = m.getReturnType();
-                String simple = returnType.getSimpleName();
-                if (simple.equals("AbstractTexture") || simple.equals("GpuTexture")
-                        || simple.equals("ResourceLocation")) continue;
-                if (!returnType.isPrimitive() && !returnType.equals(void.class)) {
-                    getTexMethod = m;
-                    break;
-                }
             }
         }
     }

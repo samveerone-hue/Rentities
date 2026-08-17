@@ -42,15 +42,15 @@ public final class EntityGlTextureResolver {
             boundRequestedTexture = true;
 
             Object texObj = getTexMethod.invoke(textureManager, loc);
-            if (texObj == null) return 0;
-
-            Object gpuTex = resolveGpuTexture(texObj);
-            if (gpuTex == null) return 0;
-
-            int glId = readGpuTexId(gpuTex);
-            if (glId > 0) {
-                GL_ID_CACHE.put(key, glId);
-                return glId;
+            if (texObj != null) {
+                Object gpuTex = resolveGpuTexture(texObj);
+                if (gpuTex != null) {
+                    int glId = readGpuTexId(gpuTex);
+                    if (glId > 0) {
+                        GL_ID_CACHE.put(key, glId);
+                        return glId;
+                    }
+                }
             }
         } catch (Throwable t) {
             if (Rentities.IS_DEBUG) {

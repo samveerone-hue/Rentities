@@ -289,12 +289,15 @@ mat4 getBipedBone(int b, EntityInstance inst) {
     float sw = inst.limbSwing;
     float sa = inst.limbSwingAmount;
 
+    // Vanilla HumanoidModel uses cosine with a PI phase offset for the
+    // right-side limbs. Using sine here made every biped's walk cycle visibly
+    // phase-shifted compared with vanilla.
     float w1 = sa > 0.01
-        ? sin(sw * 0.6662) * 1.4 * sa
+        ? cos(sw * 0.6662) * 1.4 * sa
         : 0.0;
 
     float w2 = sa > 0.01
-        ? sin(sw * 0.6662 + PI) * 1.4 * sa
+        ? cos(sw * 0.6662 + PI) * 1.4 * sa
         : 0.0;
 
     vec3 p = getP(inst, b);
@@ -329,11 +332,9 @@ mat4 getBipedBone(int b, EntityInstance inst) {
                 ? -PI * 0.5
                 : 0.0;
 
-        float sway = 0.0;
-
         return pivotRot(
             p,
-            rotX(w2 + tilt) * rotZ(0.05 + sway));
+            rotX(w2 + tilt));
     }
 
     if (b == BONE_ARM_R) {
@@ -342,11 +343,9 @@ mat4 getBipedBone(int b, EntityInstance inst) {
                 ? -PI * 0.5
                 : 0.0;
 
-        float sway = 0.0;
-
         return pivotRot(
             p,
-            rotX(w1 + tilt) * rotZ(-(0.05 + sway)));
+            rotX(w1 + tilt));
     }
 
     if (b == BONE_LEG_L)

@@ -9,6 +9,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.EntityType;
 import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryUtil;
+import net.minecraft.world.entity.decoration.Rotations;
 
 import java.lang.reflect.Field;
 import java.util.Map;
@@ -573,13 +574,14 @@ public class EntityBatchRenderer {
         final java.lang.invoke.MethodHandle yaw, yawO, limbSwing, limbSwingAmt, headYaw, headYawO, headPitch, headPitchO, attackProgress;
         final java.lang.invoke.MethodHandle deathTime, swimProgress, hurtTime, sneaking;
         final java.lang.invoke.MethodHandle type, texture, invisible, onGround, inWater;
+        final java.lang.invoke.MethodHandle headPose, bodyPose, leftArmPose, rightArmPose, leftLegPose, rightLegPose;
 
         StateAccessor(Class<?> cls) {
-            this.yaw            = mhFloat(cls,   "field_53329", "yBodyRot", "M");
-            this.yawO           = mhFloat(cls,   "yBodyRotO", "prevYBodyRot");
+            this.yaw            = mhFloat(cls,   "bodyYaw", "yBodyRot", "field_53329", "M");
+            this.yawO           = mhFloat(cls,   "bodyYawO", "yBodyRotO", "prevYBodyRot");
             this.limbSwing      = mhFloat(cls,   "field_53446", "walkAnimationPos", "ab");
             this.limbSwingAmt   = mhFloat(cls,   "field_53447", "walkAnimationSpeed", "ac");
-            this.headYaw        = mhFloat(cls,   "field_53448", "headYaw", "ad");
+            this.headYaw        = mhFloat(cls,   "headYaw", "yHeadRot", "field_53448", "ad");
             this.headYawO       = mhFloat(cls,   "yHeadRotO", "prevYHeadRot");
             this.headPitch      = mhFloat(cls,   "field_53449", "headPitch", "ae");
             this.headPitchO     = mhFloat(cls,   "xRotO", "prevXRot");
@@ -593,6 +595,15 @@ public class EntityBatchRenderer {
             this.invisible      = mhBool(cls,    "field_53333", "invisible", "Q");
             this.onGround       = mhBool(cls,    "field_53334", "onGround", "R");
             this.inWater        = mhBool(cls,    "field_53335", "inWater", "S");
+
+            // ArmorStandRenderState stores vanilla's six Rotations objects.
+            // These are optional because non-armor render-state classes do not have them.
+            this.headPose      = mhObj(cls, "headPose");
+            this.bodyPose      = mhObj(cls, "bodyPose");
+            this.leftArmPose   = mhObj(cls, "leftArmPose");
+            this.rightArmPose  = mhObj(cls, "rightArmPose");
+            this.leftLegPose   = mhObj(cls, "leftLegPose");
+            this.rightLegPose  = mhObj(cls, "rightLegPose");
         }
 
         /**
@@ -883,6 +894,25 @@ public class EntityBatchRenderer {
                         pitchDeg = net.minecraft.util.Mth.lerp(partialTick, pitchODeg, pitchDeg);
                     }
                     headPitchRel = (float) Math.toRadians(pitchDeg);
+                }
+
+                // ArmorStandRenderState contains the exact six vanilla Rotations.
+                // Copy them into the GPU payload so /data poses, markers, and custom poses
+                // survive the render-state extraction path as well as the direct path.
+                clearArmorStandPose(ptr);
+                if (isArmorStand) {
+                    writeArmorStandPoseFromHandle(ptr + EntityInstance.OFFSET_ARMOR_STAND_HEAD_POSE,
+                            acc.headPose, state);
+                    writeArmorStandPoseFromHandle(ptr + EntityInstance.OFFSET_ARMOR_STAND_BODY_POSE,
+                            acc.bodyPose, state);
+                    writeArmorStandPoseFromHandle(ptr + EntityInstance.OFFSET_ARMOR_STAND_LEFT_ARM_POSE,
+                            acc.leftArmPose, state);
+                    writeArmorStandPoseFromHandle(ptr + EntityInstance.OFFSET_ARMOR_STAND_RIGHT_ARM_POSE,
+                            acc.rightArmPose, state);
+                    writeArmorStandPoseFromHandle(ptr + EntityInstance.OFFSET_ARMOR_STAND_LEFT_LEG_POSE,
+                            acc.leftLegPose, state);
+                    writeArmorStandPoseFromHandle(ptr + EntityInstance.OFFSET_ARMOR_STAND_RIGHT_LEG_POSE,
+                            acc.rightLegPose, state);
                 }
 
                 if (acc.attackProgress != null) attackProgress = (float) invokeAccessor(acc.attackProgress, state);

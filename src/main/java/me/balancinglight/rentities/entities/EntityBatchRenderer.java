@@ -34,6 +34,24 @@ import static org.lwjgl.opengl.GL31C.glDrawElementsInstanced;
 
 public class EntityBatchRenderer {
 
+    /**
+     * Invokes a reflective MethodHandle used by the compatibility accessor layer.
+     *
+     * MethodHandle.invoke() declares Throwable, while the renderer methods intentionally
+     * do not expose Throwable. Keep the exception boundary here so one failed optional
+     * accessor can be handled by the caller's existing null/default checks.
+     */
+    private static Object invokeAccessor(java.lang.invoke.MethodHandle handle, Object state) {
+        if (handle == null) return null;
+        try {
+            return handle.invoke(state);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+
+
     public static EntityBatchRenderer INSTANCE;
 
     private static final int MAX_QUEUE = EntityInstance.MAX_INSTANCES;
@@ -816,15 +834,15 @@ public class EntityBatchRenderer {
             float partialTick = Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(true);
 
             // 1. Interpolate Body Yaw
-            float yawDeg = acc.yaw != null ? (float) acc.yaw.invoke(state) : 0f;
+            float yawDeg = acc.yaw != null ? (float) invokeAccessor(acc.yaw, state) : 0f;
             if (acc.yawO != null) {
-                float yawODeg = (float) acc.yawO.invoke(state);
+                float yawODeg = (float) invokeAccessor(acc.yawO, state);
                 yawDeg = net.minecraft.util.Mth.rotLerp(partialTick, yawODeg, yawDeg);
             }
             float rotY = (float)(Math.toRadians(yawDeg) - Math.PI);
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ROTATION_Y, rotY);
 
-            EntityType<?> type = acc.type != null ? (EntityType<?>) acc.type.invoke(state) : null;
+            EntityType<?> type = acc.type != null ? (EntityType<?>) invokeAccessor(acc.type, state) : null;
             boolean isArmorStand = (type == EntityType.ARMOR_STAND);
 
             float limbSwing    = 0f;
@@ -838,17 +856,17 @@ public class EntityBatchRenderer {
             float hurtTime       = 0f;
 
             if (!isArmorStand) {
-                if (acc.limbSwing != null) limbSwing = (float) acc.limbSwing.invoke(state);
+                if (acc.limbSwing != null) limbSwing = (float) invokeAccessor(acc.limbSwing, state);
                 if (acc.limbSwingAmt != null) {
-                    float raw = (float) acc.limbSwingAmt.invoke(state);
+                    float raw = (float) invokeAccessor(acc.limbSwingAmt, state);
                     limbSwingAmt = raw < 0f ? 0f : raw > 1f ? 1f : raw;
                 }
                 
                 // 2. Interpolate Head Yaw & Calculate Relative Angle
                 if (acc.headYaw != null) {
-                    float absHeadYaw = (float) acc.headYaw.invoke(state);
+                    float absHeadYaw = (float) invokeAccessor(acc.headYaw, state);
                     if (acc.headYawO != null) {
-                        float absHeadYawO = (float) acc.headYawO.invoke(state);
+                        float absHeadYawO = (float) invokeAccessor(acc.headYawO, state);
                         absHeadYaw = net.minecraft.util.Mth.rotLerp(partialTick, absHeadYawO, absHeadYaw);
                     }
                     float relDeg = absHeadYaw - yawDeg;
@@ -859,20 +877,20 @@ public class EntityBatchRenderer {
                 
                 // 3. Interpolate Head Pitch
                 if (acc.headPitch != null) {
-                    float pitchDeg = (float) acc.headPitch.invoke(state);
+                    float pitchDeg = (float) invokeAccessor(acc.headPitch, state);
                     if (acc.headPitchO != null) {
-                        float pitchODeg = (float) acc.headPitchO.invoke(state);
+                        float pitchODeg = (float) invokeAccessor(acc.headPitchO, state);
                         pitchDeg = net.minecraft.util.Mth.lerp(partialTick, pitchODeg, pitchDeg);
                     }
                     headPitchRel = (float) Math.toRadians(pitchDeg);
                 }
 
-                if (acc.attackProgress != null) attackProgress = (float) acc.attackProgress.invoke(state);
-                if (acc.swimProgress   != null) swimProgress   = (float) acc.swimProgress.invoke(state);
-                if (acc.sneaking       != null && (boolean) acc.sneaking.invoke(state)) sneakProg = 1f;
-                if (acc.hurtTime       != null && (boolean) acc.hurtTime.invoke(state))  hurtTime  = 10f;
+                if (acc.attackProgress != null) attackProgress = (float) invokeAccessor(acc.attackProgress, state);
+                if (acc.swimProgress   != null) swimProgress   = (float) invokeAccessor(acc.swimProgress, state);
+                if (acc.sneaking       != null && (boolean) invokeAccessor(acc.sneaking, state)) sneakProg = 1f;
+                if (acc.hurtTime       != null && (boolean) invokeAccessor(acc.hurtTime, state))  hurtTime  = 10f;
                 if (acc.deathTime      != null) {
-                    float raw = (float) acc.deathTime.invoke(state);
+                    float raw = (float) invokeAccessor(acc.deathTime, state);
                     if (raw >= 0f && raw <= 20f) deathTime = raw;
                 }
             }
@@ -896,15 +914,15 @@ public class EntityBatchRenderer {
 
             int flags = 0;
 
-            if (acc.invisible != null && (boolean) acc.invisible.invoke(state)) {
+            if (acc.invisible != null && (boolean) invokeAccessor(acc.invisible, state)) {
                 flags |= EntityInstance.FLAG_IS_INVISIBLE;
             }
 
-            if (acc.onGround != null && (boolean) acc.onGround.invoke(state)) {
+            if (acc.onGround != null && (boolean) invokeAccessor(acc.onGround, state)) {
                 flags |= EntityInstance.FLAG_ON_GROUND;
             }
 
-            if (acc.inWater != null && (boolean) acc.inWater.invoke(state)) {
+            if (acc.inWater != null && (boolean) invokeAccessor(acc.inWater, state)) {
                 flags |= EntityInstance.FLAG_IS_IN_WATER;
             }
 
@@ -964,7 +982,7 @@ public class EntityBatchRenderer {
     
         if (acc.type != null) {
             try {
-                return (EntityType<?>) acc.type.invoke(state);
+                return (EntityType<?>) invokeAccessor(acc.type, state);
             } catch (Exception e) {
                 if (Rentities.IS_DEBUG) {
                     Rentities.LOGGER.warn(

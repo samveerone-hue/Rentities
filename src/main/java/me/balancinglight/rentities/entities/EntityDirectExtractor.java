@@ -479,11 +479,11 @@ public final class EntityDirectExtractor {
                     partialTick);
 
             return state;
-        } catch (Throwable t) {
+        } catch (Exception e) {
             if (Rentities.IS_DEBUG) {
                 Rentities.LOGGER.warn(
-                        "Failed to extract ArmorStandRenderState: {}",
-                        t.getMessage());
+                        "Failed to extract ArmorStandRenderState",
+                        e);
             }
             return null;
         }

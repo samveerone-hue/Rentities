@@ -213,7 +213,13 @@ public class EntityMeshBaker {
 
         // Get the renderer map via reflection (field_4696 in 1.21.11 EntityRenderDispatcher)
         Map<EntityType<?>, net.minecraft.client.renderer.entity.EntityRenderer<?, ?>> rendererMap =
-                getRendererMap(dispatcher);
+        getRendererMap(dispatcher);
+
+        if (rendererMap == null) {
+            Rentities.LOGGER.error(
+                    "Unable to access EntityRenderDispatcher renderer map; GPU entity baking disabled");
+            return;
+        }
 
         for (EntityType<?> type : EntityBatchRegistry.REGISTRY_TYPES()) {
             EntityAnimationCategory category = EntityBatchRegistry.getCategory(type);
@@ -255,14 +261,16 @@ public class EntityMeshBaker {
                 }
             }
 
-            // Fallback to placeholder if extraction failed
+            // Do not create fake production geometry when real extraction fails.
             if (vertices == null || vertices.length == 0) {
                 if (Rentities.IS_DEBUG) {
-                    Rentities.LOGGER.warn("Using placeholder mesh for {}", type);
+                    Rentities.LOGGER.warn(
+                        "No valid mesh extracted for {}; skipping GPU mesh registration",
+                       type);
                 }
-                vertices = generatePlaceholderMesh(category);
+                continue;
             }
-
+            
             int[] indices = generateIndices(vertices.length / 9, vertexCount);
 
             int byteVertexOffset = vertexCount * VERTEX_STRIDE;

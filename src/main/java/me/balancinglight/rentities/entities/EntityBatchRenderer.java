@@ -561,7 +561,7 @@ public class EntityBatchRenderer {
 
         glStateCache.useProgram(entityShader.id);
         glUniform1i(uIndirect, 1);
-        glUniform1i(uFastAnimation, 1);
+        glUniform1i(uFastAnimation, 0);
         cullPipeline.bindForDraw();
 
         int runFirst = 0;
@@ -586,11 +586,13 @@ public class EntityBatchRenderer {
         var meshInfoMap = meshBaker.getMeshInfoMap();
         int instanceOffset = 0;
         EntityType<?> currentType = null;
+        int currentTextureId = -1;
         int currentCount = 0;
 
         for (int i = 0; i <= count; i++) {
             EntityType<?> type = (i < count) ? queuedTypes[i] : null;
-            if (type != currentType) {
+            int textureId = (i < count) ? extractionTextureIds[queuedOriginalIndices[i]] : -1;
+            if (type != currentType || textureId != currentTextureId) {
                 if (currentType != null && currentCount > 0) {
                     var meshInfo = meshInfoMap.get(currentType);
                     if (meshInfo != null) {
@@ -611,6 +613,7 @@ public class EntityBatchRenderer {
                     instanceOffset += currentCount;
                 }
                 currentType = type;
+                currentTextureId = textureId;
                 currentCount = 1;
             } else {
                 currentCount++;

@@ -98,8 +98,25 @@ public final class EntityGlTextureResolver {
             if (bindTexMethod == null && (name.equals("method_4615") || name.equals("bindTexture"))) {
                 bindTexMethod = m;
             }
-            if (getTexMethod == null && (name.equals("method_4619") || name.equals("getTexture"))) {
+            if (getTexMethod == null && (name.equals("method_4619") || name.equals("method_4620") || name.equals("getTexture"))) {
                 getTexMethod = m;
+            }
+        }
+
+        // 1.21.11 has builds where the intermediary getter is exposed as method_4620.
+        // Keep a signature-based fallback so a remap/name change cannot make every
+        // batched entity sample texture 0 while the model geometry itself is valid.
+        if (getTexMethod == null) {
+            for (Method m : tm.getClass().getMethods()) {
+                if (m.getParameterCount() != 1 || !m.getParameterTypes()[0].isAssignableFrom(locClass)) continue;
+                Class<?> returnType = m.getReturnType();
+                String simple = returnType.getSimpleName();
+                if (simple.equals("AbstractTexture") || simple.equals("GpuTexture")
+                        || simple.equals("ResourceLocation")) continue;
+                if (!returnType.isPrimitive() && !returnType.equals(void.class)) {
+                    getTexMethod = m;
+                    break;
+                }
             }
         }
     }

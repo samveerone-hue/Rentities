@@ -25,19 +25,15 @@ jobs:
         with:
           cache-read-only: false
 
-      # Step 4: Force Gradle 9.4.0 to match Loom 1.16.1 requirements
-      - name: Repair Gradle Wrapper
-        run: gradle wrapper --gradle-version 9.4.0
-
-      # Step 5: Grant execute permission for Gradle wrapper
+      # Step 4: Grant execute permission for Gradle wrapper
       - name: Make gradlew Executable
         run: chmod +x ./gradlew
 
-      # Step 6: Build project
+      # Step 5: Build project
       - name: Build with Gradle
         run: ./gradlew build --no-daemon
 
-      # Step 7: Upload build artifacts (.jar files)
+      # Step 6: Upload build artifacts (.jar files)
       - name: Upload Mod Artifacts
         uses: actions/upload-artifact@v4
         with:

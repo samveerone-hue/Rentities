@@ -27,8 +27,11 @@ public final class EntityGlTextureResolver {
         ensureMethods(loc);
         if (textureManager == null || bindTexMethod == null || getTexMethod == null) return 0;
 
+        boolean boundRequestedTexture = false;
         try {
             bindTexMethod.invoke(textureManager, loc);
+            boundRequestedTexture = true;
+
             Object texObj = getTexMethod.invoke(textureManager, loc);
             if (texObj == null) return 0;
 
@@ -43,6 +46,10 @@ public final class EntityGlTextureResolver {
             }
         }
 
+        // Only use the currently bound texture when this resolver successfully bound the
+        // requested location first. Otherwise returning GL_TEXTURE_BINDING_2D could make a
+        // failed lookup render an unrelated texture left behind by another draw call.
+        if (!boundRequestedTexture) return 0;
         return org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL11.GL_TEXTURE_BINDING_2D);
     }
 

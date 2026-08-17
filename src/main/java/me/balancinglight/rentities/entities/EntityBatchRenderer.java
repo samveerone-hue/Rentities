@@ -137,8 +137,14 @@ public class EntityBatchRenderer {
         queuedTypes[idx] = type;
         extractionTypes[idx] = type;
         queuedOriginalIndices[idx] = idx;
-        INSTANCE.writeEntityInstance(
-            extractionBuffer + (long) idx * EntityInstance.STRIDE, state, x, y, z);
+        if (!INSTANCE.writeEntityInstance(
+                extractionBuffer + (long) idx * EntityInstance.STRIDE, state, x, y, z)) {
+            queuedTypes[idx] = null;
+            extractionTypes[idx] = null;
+            queuedOriginalIndices[idx] = 0;
+            queueSize.decrementAndGet();
+            return false;
+        }
         return true;
     }
 
@@ -187,12 +193,18 @@ public class EntityBatchRenderer {
         extractionTypes[idx] = type;
         queuedOriginalIndices[idx] = idx;
 
-        INSTANCE.writeEntityInstance(
+        if (!INSTANCE.writeEntityInstance(
                 extractionBuffer + (long) idx * EntityInstance.STRIDE,
                 state,
                 x,
                 y,
-                z);
+                z)) {
+            queuedTypes[idx] = null;
+            extractionTypes[idx] = null;
+            queuedOriginalIndices[idx] = 0;
+            queueSize.decrementAndGet();
+            return false;
+        }
 
         return true;
     }
@@ -792,8 +804,8 @@ public class EntityBatchRenderer {
         lastBoundGlTexId = glId;
     }
     
-    public void writeEntityInstance(long ptr, Object state, double rx, double ry, double rz) {
-        if (state == null) return;
+    public boolean writeEntityInstance(long ptr, Object state, double rx, double ry, double rz) {
+        if (state == null) return false;
         StateAccessor acc = ACCESSOR_CACHE.get(state.getClass());
         try {
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_POSITION_X, (float) rx);
@@ -930,16 +942,18 @@ public class EntityBatchRenderer {
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_TEX_SCALE_Y,   1f);
 
         } catch (Exception e) {
-        if (Rentities.IS_DEBUG) {
-            Rentities.LOGGER.warn(
-                    "[Rentities] Failed to extract entity instance data for {}",
-                    state != null ? state.getClass().getName() : "null",
-                    e);
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.warn(
+                        "[Rentities] Failed to extract entity instance data for {}",
+                        state != null ? state.getClass().getName() : "null",
+                        e);
+            }
+
+            MemoryUtil.memSet(ptr, 0, EntityInstance.STRIDE);
+            return false;
         }
 
-        MemoryUtil.memSet(ptr, 0, EntityInstance.STRIDE);
-    }
-        
+        return true;
     }
 
     @SuppressWarnings("unchecked")

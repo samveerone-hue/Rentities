@@ -10,6 +10,7 @@ import static org.lwjgl.opengl.GL32C.GL_WAIT_FAILED;
 import static org.lwjgl.opengl.GL32C.glClientWaitSync;
 import static org.lwjgl.opengl.GL32C.glDeleteSync;
 import static org.lwjgl.opengl.GL32C.glFenceSync;
+import static org.lwjgl.opengl.GL11C.glFinish;
 
 /**
  * Per-slot GPU fences for a {@link GpuRingBuffer}.
@@ -46,7 +47,10 @@ public final class GpuFenceRing {
             int result = glClientWaitSync(fence, flags, WAIT_CHUNK_NS);
             if (result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED) break;
             if (result == GL_WAIT_FAILED) {
-                Rentities.LOGGER.warn("[Entity] glClientWaitSync failed on ring slot {}", slot);
+                Rentities.LOGGER.error(
+                        "[Entity] glClientWaitSync failed on ring slot {}; forcing GPU completion",
+                        slot);
+                glFinish();
                 break;
             }
             // GL_TIMEOUT_EXPIRED — the flush bit must not be repeated (spec: it is only

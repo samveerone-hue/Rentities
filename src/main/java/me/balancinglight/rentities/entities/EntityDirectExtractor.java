@@ -58,15 +58,20 @@ public final class EntityDirectExtractor {
      * ThreadLocal is used because rendering happens on the client render thread and
      * the guard must not leak between unrelated rendering operations.
      */
-    private static final ThreadLocal<Boolean> SKIP_BATCHING =
-            ThreadLocal.withInitial(() -> false);
+    private static final ThreadLocal<Integer> SKIP_BATCHING_DEPTH =
+            ThreadLocal.withInitial(() -> 0);
 
     public static void setSkipBatching(boolean skip) {
-        SKIP_BATCHING.set(skip);
+        int depth = SKIP_BATCHING_DEPTH.get();
+        if (skip) {
+            SKIP_BATCHING_DEPTH.set(depth + 1);
+        } else {
+            SKIP_BATCHING_DEPTH.set(Math.max(0, depth - 1));
+        }
     }
 
     public static boolean isSkippingBatching() {
-        return SKIP_BATCHING.get();
+        return SKIP_BATCHING_DEPTH.get() > 0;
     }
 
     private EntityDirectExtractor() {}

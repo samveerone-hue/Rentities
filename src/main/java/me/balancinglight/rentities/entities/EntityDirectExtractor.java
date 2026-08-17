@@ -541,6 +541,8 @@ public final class EntityDirectExtractor {
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_TEX_SCALE_Y,
                 1f);
+
+        return true;
     }
 
     /**

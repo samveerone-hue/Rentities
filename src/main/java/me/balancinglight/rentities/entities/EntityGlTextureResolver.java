@@ -11,33 +11,43 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Resolves OpenGL texture names from Minecraft {@code ResourceLocation} keys.
- * Method and field lookups are cached once; per-location GL ids are resolved once per session.
+ * Resolves OpenGL texture names from Minecraft 1.21.11 texture identifiers.
+ *
+ * 1.21.11 no longer exposes the old TextureManager.bindTexture path. In particular,
+ * intermediary method_4615 is destroyTexture, not bindTexture. Calling it here would
+ * destroy the very texture Rentities was trying to render.
+ *
+ * The 1.21.11 path is:
+ *   TextureManager.getTexture (method_4619)
+ *       -> AbstractTexture.getGlTexture (method_68004)
+ *       -> concrete GlTexture integer handle
+ *
+ * We resolve the GL name without mutating Minecraft's currently bound texture.
  */
 public final class EntityGlTextureResolver {
 
-    private static Object textureManager = null;
-    private static Method bindTexMethod = null;
-    private static Method getTexMethod = null;
-    private static MethodHandle gpuTexGetter = null;
-    private static MethodHandle gpuTexIdGetter = null;
+    private static Object textureManager;
+    private static Method getTexMethod;
+    private static MethodHandle glTextureGetter;
+    private static MethodHandle glTextureIdGetter;
+
     private static final Map<String, Integer> GL_ID_CACHE = new ConcurrentHashMap<>();
 
     private EntityGlTextureResolver() {}
 
     public static int resolveGlId(Object loc) {
         if (loc == null) return 0;
+
         String key = String.valueOf(loc);
         Integer cached = GL_ID_CACHE.get(key);
-        if (cached != null && cached > 0 && org.lwjgl.opengl.GL11.glIsTexture(cached)) return cached;
-        if (cached != null) GL_ID_CACHE.remove(key, cached);
-        ensureMethods(loc);
-        if (textureManager == null || bindTexMethod == null || getTexMethod == null) return 0;
+        if (cached != null) {
+            if (org.lwjgl.opengl.GL11.glIsTexture(cached)) return cached;
+            GL_ID_CACHE.remove(key, cached);
+        }
 
-        boolean boundRequestedTexture = false;
         try {
-            bindTexMethod.invoke(textureManager, loc);
-            boundRequestedTexture = true;
+            ensureMethods(loc);
+            if (textureManager == null || getTexMethod == null) return 0;
 
             Object texObj = getTexMethod.invoke(textureManager, loc);
             if (texObj == null) return 0;
@@ -46,83 +56,127 @@ public final class EntityGlTextureResolver {
             if (gpuTex == null) return 0;
 
             int glId = readGpuTexId(gpuTex);
-            if (glId > 0) { GL_ID_CACHE.put(key, glId); return glId; }
+            if (glId > 0 && org.lwjgl.opengl.GL11.glIsTexture(glId)) {
+                GL_ID_CACHE.put(key, glId);
+                return glId;
+            }
         } catch (Throwable t) {
             if (Rentities.IS_DEBUG) {
-                Rentities.LOGGER.warn("resolveGlId failed for {}: {}", loc, t.getMessage());
+                Rentities.LOGGER.warn(
+                        "[Rentities] Texture ID resolution failed for {}: {}",
+                        loc, t.toString());
             }
         }
-
-        // Only use the currently bound texture when this resolver successfully bound the
-        // requested location first. Otherwise returning GL_TEXTURE_BINDING_2D could make a
-        // failed lookup render an unrelated texture left behind by another draw call.
-        if (!boundRequestedTexture) return 0;
-        int bound = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL11.GL_TEXTURE_BINDING_2D);
-        if (bound > 0) GL_ID_CACHE.put(key, bound);
-        return bound;
+        return 0;
     }
 
     public static void invalidateCache() {
         GL_ID_CACHE.clear();
         textureManager = null;
-        bindTexMethod = null;
         getTexMethod = null;
-        gpuTexGetter = null;
-        gpuTexIdGetter = null;
+        glTextureGetter = null;
+        glTextureIdGetter = null;
     }
 
     private static void ensureMethods(Object loc) {
-        if (textureManager != null && bindTexMethod != null && getTexMethod != null) return;
+        if (textureManager != null && getTexMethod != null) return;
 
-        var mc = Minecraft.getInstance();
+        Minecraft mc = Minecraft.getInstance();
         if (mc == null) return;
-        var tm = mc.getTextureManager();
+
+        Object tm = mc.getTextureManager();
         if (tm == null) return;
 
         textureManager = tm;
-        Class<?> locClass = loc.getClass();
 
+        // Minecraft 1.21.11: TextureManager#getTexture -> intermediary method_4619.
+        Class<?> locClass = loc.getClass();
         for (Method m : tm.getClass().getMethods()) {
-            if (m.getParameterCount() != 1 || !m.getParameterTypes()[0].isAssignableFrom(locClass)) continue;
+            if (m.getParameterCount() != 1) continue;
+            if (!m.getParameterTypes()[0].isAssignableFrom(locClass)) continue;
+
             String name = m.getName();
-            if (bindTexMethod == null && (name.equals("method_4615") || name.equals("bindTexture"))) {
-                bindTexMethod = m;
-            }
-            if (getTexMethod == null && (name.equals("method_4619") || name.equals("getTexture"))) {
+            if (name.equals("method_4619") || name.equals("getTexture")) {
                 getTexMethod = m;
+                return;
             }
         }
     }
 
     private static Object resolveGpuTexture(Object texObj) throws Throwable {
-        if (gpuTexGetter != null) {
-            return gpuTexGetter.invoke(texObj);
+        if (glTextureGetter != null) {
+            return glTextureGetter.invoke(texObj);
         }
 
+        // Minecraft 1.21.11 AbstractTexture#getGlTexture is method_68004.
         for (Method m : texObj.getClass().getMethods()) {
-            if (m.getParameterCount() == 0 && m.getReturnType().getSimpleName().equals("GpuTexture")) {
+            if (m.getParameterCount() != 0) continue;
+            if (m.getReturnType().getName().equals("com.mojang.blaze3d.textures.GpuTexture")
+                    || m.getName().equals("method_68004")
+                    || m.getName().equals("getGlTexture")) {
                 MethodHandle mh = MethodHandles.lookup().unreflect(m);
-                gpuTexGetter = mh.asType(mh.type().changeReturnType(Object.class));
-                return gpuTexGetter.invoke(texObj);
+                glTextureGetter = mh.asType(
+                        mh.type().changeReturnType(Object.class));
+                return glTextureGetter.invoke(texObj);
+            }
+        }
+
+        // Defensive fallback for wrappers that don't expose the inherited getter publicly.
+        Class<?> cls = texObj.getClass();
+        while (cls != null && cls != Object.class) {
+            try {
+                Field f = cls.getDeclaredField("field_56974");
+                f.setAccessible(true);
+                return f.get(texObj);
+            } catch (NoSuchFieldException ignored) {
+                cls = cls.getSuperclass();
             }
         }
         return null;
     }
 
     private static int readGpuTexId(Object gpuTex) throws Throwable {
-        if (gpuTexIdGetter != null) {
-            return (int) gpuTexIdGetter.invoke(gpuTex);
+        if (glTextureIdGetter != null) {
+            return (int) glTextureIdGetter.invoke(gpuTex);
         }
 
-        for (Field f : gpuTex.getClass().getDeclaredFields()) {
-            if (f.getType() != int.class) continue;
-            f.setAccessible(true);
-            int glId = f.getInt(gpuTex);
-            if (glId > 0) {
-                gpuTexIdGetter = MethodHandles.lookup().unreflectGetter(f);
-                return glId;
+        Class<?> cls = gpuTex.getClass();
+        while (cls != null && cls != Object.class) {
+            for (Field f : cls.getDeclaredFields()) {
+                if (f.getType() != int.class) continue;
+                String n = f.getName();
+                // Prefer the actual GL handle field when mappings expose it by name.
+                if (!n.equals("id") && !n.equals("glId") && !n.equals("texture")
+                        && !n.equals("textureId") && !n.equals("handle")
+                        && !n.equals("field_64522")) {
+                    continue;
+                }
+                f.setAccessible(true);
+                int id = f.getInt(gpuTex);
+                if (id > 0) {
+                    glTextureIdGetter = MethodHandles.lookup().unreflectGetter(f);
+                    return id;
+                }
             }
+            cls = cls.getSuperclass();
         }
+
+        // Last-resort compatibility path: GlTexture has a single primary int handle
+        // in the OpenGL backend. Do not select arbitrary non-positive fields.
+        cls = gpuTex.getClass();
+        while (cls != null && cls != Object.class) {
+            for (Field f : cls.getDeclaredFields()) {
+                if (f.getType() != int.class) continue;
+                f.setAccessible(true);
+                int id = f.getInt(gpuTex);
+                if (id > 0 && org.lwjgl.opengl.GL11.glIsTexture(id)) {
+                    glTextureIdGetter = MethodHandles.lookup().unreflectGetter(f);
+                    return id;
+                }
+            }
+            cls = cls.getSuperclass();
+        }
+
         return 0;
     }
 }

@@ -116,11 +116,6 @@ public class EntityBatchRenderer {
     public final java.util.Map<EntityType<?>, Integer> entityGlTexIds = new ConcurrentHashMap<>();
     public final java.util.Set<EntityType<?>> entityTexFailed = java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
 
-    // Cached TextureManager method for binding textures - resolved once at first use
-    private java.lang.reflect.Method cachedBindTexMethod = null;
-    private java.lang.reflect.Method cachedGetTexMethod = null;
-    private Object cachedTextureManager = null;
-
     public EntityBatchRenderer() {
         INSTANCE = this;
         this.meshBaker = new EntityMeshBaker();
@@ -728,112 +723,34 @@ public class EntityBatchRenderer {
         @Override protected StateAccessor computeValue(Class<?> type) { return new StateAccessor(type); }
     };
 
-    private void ensureTexMethodsCached() {
-        if (cachedTextureManager != null) return;
-        try {
-            var mc = Minecraft.getInstance();
-            if (mc == null) return;
-            var tm = mc.getTextureManager();
-            if (tm == null) return;
-            cachedTextureManager = tm;
-        } catch (Exception e) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("ensureTexMethodsCached failed: {}", e.getMessage());
-        }
-    }
 
-    private void resolveTexMethods(Object loc) {
-        if (cachedBindTexMethod != null && cachedGetTexMethod != null) return;
-        if (cachedTextureManager == null) return;
-        try {
-            String[] bindNames = {"method_4615", "bindTexture"};
-            String[] getNames  = {"method_4619", "getTexture", "method_4620"};
-            for (java.lang.reflect.Method m : cachedTextureManager.getClass().getMethods()) {
-                if (m.getParameterCount() != 1) continue;
-                if (!m.getParameterTypes()[0].isAssignableFrom(loc.getClass())) continue;
-                String name = m.getName();
-                for (String n : bindNames) if (n.equals(name)) { cachedBindTexMethod = m; break; }
-                for (String n : getNames)  if (n.equals(name)) { cachedGetTexMethod  = m; break; }
-            }
-            if (Rentities.IS_DEBUG)
-                Rentities.LOGGER.info("Resolved tex methods: bind={} get={}",
-                    cachedBindTexMethod != null ? cachedBindTexMethod.getName() : "null",
-                    cachedGetTexMethod  != null ? cachedGetTexMethod.getName()  : "null");
-        } catch (Exception e) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("resolveTexMethods failed: {}", e.getMessage());
-        }
-    }
 
     /** Binds the entity type's texture to unit 0; returns true on success. */
     private boolean bindEntityTexture(EntityType<?> type) {
         if (type == null) return false;
 
         Integer cached = entityGlTexIds.get(type);
-        if (cached != null && cached > 0) {
-            if (!glIsTexture(cached)) {
-                entityGlTexIds.remove(type);
-            } else {
-                bindTextureUnit0(cached);
-                return true;
-            }
+        if (cached != null && cached > 0 && glIsTexture(cached)) {
+            bindTextureUnit0(cached);
+            return true;
         }
+        if (cached != null) entityGlTexIds.remove(type, cached);
 
         Object loc = entityTextureLocs.get(type);
         if (loc == null) {
             unbindTextureUnit0();
-            if (Rentities.IS_DEBUG) {
-                Rentities.LOGGER.warn("[Rentities] No texture location for {}; unbinding unit 0", type);
-            }
             return false;
         }
 
         int glId = EntityGlTextureResolver.resolveGlId(loc);
-        if (glId > 0) {
+        if (glId > 0 && glIsTexture(glId)) {
             entityGlTexIds.put(type, glId);
             bindTextureUnit0(glId);
             return true;
         }
 
-        ensureTexMethodsCached();
-        if (cachedTextureManager == null) {
-            unbindTextureUnit0();
-            return false;
-        }
-        resolveTexMethods(loc);
-        try {
-            if (cachedBindTexMethod != null)
-                cachedBindTexMethod.invoke(cachedTextureManager, loc);
-
-            if (cachedGetTexMethod != null) {
-                Object texObj = cachedGetTexMethod.invoke(cachedTextureManager, loc);
-                if (texObj != null) {
-                    Object gpuTex = null;
-                    for (java.lang.reflect.Method m : texObj.getClass().getMethods()) {
-                        if (m.getParameterCount() == 0
-                                && m.getReturnType().getSimpleName().equals("GpuTexture")) {
-                            gpuTex = m.invoke(texObj);
-                            break;
-                        }
-                    }
-                    if (gpuTex != null) {
-                        for (Field f : gpuTex.getClass().getDeclaredFields()) {
-                            if (f.getType() == int.class) {
-                                f.setAccessible(true);
-                                int id = f.getInt(gpuTex);
-                                if (id > 0 && glIsTexture(id)) {
-                                    entityGlTexIds.put(type, id);
-                                    bindTextureUnit0(id);
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("bindEntityTexture failed: {}", e.getMessage());
-        }
-        // Never reuse whatever texture is currently bound on unit 0.
-        unbindTextureUnit0();
+        // Do not unbind another valid texture on a resolver miss. The caller will
+        // fall back to vanilla/CPU rendering if it needs a guaranteed texture.
         return false;
     }
 

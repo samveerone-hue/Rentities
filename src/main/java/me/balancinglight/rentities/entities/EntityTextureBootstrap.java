@@ -35,6 +35,7 @@ public final class EntityTextureBootstrap {
                 int glId = EntityGlTextureResolver.resolveGlId(loc);
                 if (glId > 0) {
                     renderer.entityGlTexIds.put(type, glId);
+                    renderer.entityTexFailed.remove(type);
                 }
                 if (Rentities.IS_DEBUG) {
                     Rentities.LOGGER.info("Bootstrapped texture for {}: {}", type, loc);

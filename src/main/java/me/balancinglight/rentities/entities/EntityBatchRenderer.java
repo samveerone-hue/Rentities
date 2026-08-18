@@ -134,27 +134,30 @@ public class EntityBatchRenderer {
         // Prefer persistent mapping, but retain a standard SSBO upload backend so GPU
         // batching can survive on drivers that expose the required GL 4.3 path without
         // reliable persistent mapping. The backend is isolated from entity extraction.
+        /*
+         * Stable batching baseline:
+         *
+         * The original working Rentities path used an explicitly uploaded SSBO each
+         * frame. Keep that contract as the default. Persistent/coherent mapping is
+         * retained as an experimental backend, but it must not sit on the critical
+         * visibility path until it has been proven against Sodium/Helium/Catalyst.
+         */
         InstanceBufferBackend selected;
         try {
-            if (Rentities.CAPABILITIES != null && Rentities.CAPABILITIES.persistentMappingAllowed()) {
-                selected = new PersistentMappedInstanceBufferBackend(EntityInstance.SSBO_SIZE, NUM_BUFFERS);
-            } else {
-                selected = new StandardInstanceBufferBackend(EntityInstance.SSBO_SIZE, NUM_BUFFERS);
-            }
-        } catch (Throwable t) {
+            selected = new StandardInstanceBufferBackend(EntityInstance.SSBO_SIZE, NUM_BUFFERS);
+        } catch (Throwable standardError) {
             if (Rentities.CAPABILITIES != null) {
-                Rentities.CAPABILITIES.markFailed(RendererCapabilityState.Feature.PERSISTENT_MAPPING, t);
+                Rentities.CAPABILITIES.markFailed(
+                        RendererCapabilityState.Feature.GPU_BATCHING, standardError);
             }
-            try {
-                selected = new StandardInstanceBufferBackend(EntityInstance.SSBO_SIZE, NUM_BUFFERS);
-            } catch (Throwable fallbackError) {
-                if (Rentities.CAPABILITIES != null) {
-                    Rentities.CAPABILITIES.markFailed(RendererCapabilityState.Feature.GPU_BATCHING, fallbackError);
-                }
-                throw fallbackError;
-            }
+            throw standardError;
         }
         this.instanceBuffer = selected;
+        if (Rentities.IS_DEBUG) {
+            Rentities.LOGGER.info(
+                    "[Rentities] GPU batching SSBO backend: {}",
+                    selected.getClass().getSimpleName());
+        }
         EntityCullingPipeline culling = null;
         if (Rentities.CAPABILITIES == null || Rentities.CAPABILITIES.indirectAllowed(Rentities.config)) {
             try {

@@ -38,6 +38,7 @@ public final class StandardInstanceBufferBackend implements InstanceBufferBacken
     public long addrOf(int slot) { return stagingAddr + stride * slot; }
     public boolean persistent() { return false; }
 
+    /** Uploads the exact active instance range; renderer synchronizes shader visibility. */
     public void upload(int slot, long bytes) {
         if (bytes <= 0) return;
         glNamedBufferSubData(id, offsetOf(slot), MemoryUtil.memByteBuffer(addrOf(slot), Math.toIntExact(bytes)));

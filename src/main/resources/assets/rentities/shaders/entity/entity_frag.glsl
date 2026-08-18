@@ -5,6 +5,8 @@ in flat int  vFlags;
 in vec3      vNormal;
 in float     vHurtAlpha;
 in float     vGlintAnim;
+in flat int  vPackedLight;
+in flat int  vMaterialFlags;
 
 out vec4 fragColor;
 
@@ -22,11 +24,9 @@ void main() {
     // Discard fully transparent pixels (entity textures have alpha cutouts)
     if (tex.a < 0.05) discard;
 
-    // Simple directional lighting
-    vec3 N = normalize(length(vNormal) < 0.01 ? vec3(0.0, 1.0, 0.0) : vNormal);
-    vec3 L = normalize(vec3(0.4, 1.0, 0.6));
-    float light = 0.4 + max(0.0, dot(N, L)) * 0.6;
-
+    float blockLight = float((vPackedLight >> 4) & 15) / 15.0;
+    float skyLight = float((vPackedLight >> 20) & 15) / 15.0;
+    float light = 0.08 + 0.92 * max(blockLight, skyLight);
     vec3 color = tex.rgb * light;
 
     // Hurt flash (red overlay)

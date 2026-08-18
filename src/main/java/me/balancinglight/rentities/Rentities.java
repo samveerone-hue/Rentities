@@ -31,11 +31,12 @@ public class Rentities implements ClientModInitializer {
             IS_COMPATIBLE = CAPABILITIES.isProbed();
             LOGGER.info("[Rentities] renderer capability state: {}", CAPABILITIES.describe());
         }
-        IS_ENABLED = IS_COMPATIBLE && BACKEND_MANAGER.select() != RendererBackendManager.Backend.VANILLA;
+        IS_ENABLED = config != null && config.rentities_enabled && IS_COMPATIBLE
+                && BACKEND_MANAGER.select() != RendererBackendManager.Backend.VANILLA;
     }
 
     public static boolean shouldInterceptEntity() {
-        if (!IS_COMPATIBLE || config == null) return false;
+        if (!IS_COMPATIBLE || config == null || !config.rentities_enabled) return false;
         return BACKEND_MANAGER.select() != RendererBackendManager.Backend.VANILLA;
     }
 

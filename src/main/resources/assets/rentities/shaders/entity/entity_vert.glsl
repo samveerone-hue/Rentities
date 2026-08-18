@@ -68,6 +68,11 @@ struct EntityInstance {
     vec4 armorStandRightArmPose;
     vec4 armorStandLeftLegPose;
     vec4 armorStandRightLegPose;
+
+    int packedLight;
+    float slimeScaleXZ;
+    float slimeScaleY;
+    int materialFlags;
 };
 
 layout(std430, binding = 12) buffer EntityInstanceBuffer {
@@ -128,6 +133,8 @@ out flat int  vFlags;
 out vec3      vNormal;
 out float     vHurtAlpha;
 out float     vGlintAnim;
+out flat int   vPackedLight;
+out flat int   vMaterialFlags;
 
 // ── Animation categories ──────────────────────────────────────────────────────
 #define ANIM_BIPED             0
@@ -167,6 +174,7 @@ out float     vGlintAnim;
 #define FLAG_IN_WATER    8
 #define FLAG_ZOMBIE_ARMS 256
 #define FLAG_ARMOR_STAND 512
+#define FLAG_SLIME 1024
 
 #define PI 3.14159265358979
 
@@ -1046,6 +1054,11 @@ void main() {
             localNrm.y,
             localNrm.x * s + localNrm.z * c);
 
+    if ((inst.materialFlags & FLAG_SLIME) != 0) {
+        rotPos.xz *= max(inst.slimeScaleXZ, 0.01);
+        rotPos.y *= max(inst.slimeScaleY, 0.01);
+    }
+
     // Pixels -> blocks (x0.0625) + camera-relative world position
     vec4 worldPos =
         vec4(
@@ -1069,4 +1082,6 @@ void main() {
 
     vGlintAnim =
         fract(uGameTime * 0.001) * (2.0 * PI);
+    vPackedLight = inst.packedLight;
+    vMaterialFlags = inst.materialFlags;
 }

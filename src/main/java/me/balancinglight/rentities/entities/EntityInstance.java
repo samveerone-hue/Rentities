@@ -9,7 +9,7 @@ public final class EntityInstance {
      *
      * Total SSBO instance stride: 256 bytes.
      */
-    public static final int STRIDE = 256;
+    public static final int STRIDE = 272;
 
     // Byte offsets
     public static final int OFFSET_POSITION_X       = 0;
@@ -84,6 +84,13 @@ public final class EntityInstance {
     public static final int OFFSET_ARMOR_STAND_LEFT_LEG_POSE   = 224;
     public static final int OFFSET_ARMOR_STAND_RIGHT_LEG_POSE  = 240;
 
+    // Per-instance render parity payload (16 bytes).
+    public static final int OFFSET_PACKED_LIGHT    = 256;
+    public static final int OFFSET_SLIME_SCALE_XZ  = 260;
+    public static final int OFFSET_SLIME_SCALE_Y   = 264;
+    public static final int OFFSET_MATERIAL_FLAGS  = 268;
+
+
     // Flag bits
     public static final int FLAG_IS_BLOCKING  = 1;
     public static final int FLAG_IS_GLIDING   = 2;
@@ -94,6 +101,7 @@ public final class EntityInstance {
     public static final int FLAG_IS_INVISIBLE = 64;
     public static final int FLAG_ON_GROUND    = 128;
     public static final int FLAG_ZOMBIE_ARMS  = 256;
+    public static final int FLAG_SLIME        = 1024;
 
     /**
      * Entity is an ArmorStand and must use the six explicit armor-stand pose slots

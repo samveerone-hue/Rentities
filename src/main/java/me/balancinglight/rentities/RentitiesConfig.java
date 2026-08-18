@@ -18,6 +18,9 @@ public class RentitiesConfig {
 
     public RendererBackendMode rendererBackend = RendererBackendMode.AUTO;
 
+    // Master switch. When false, Rentities never intercepts entity rendering.
+    public boolean rentities_enabled = true;
+
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path CONFIG_PATH = FabricLoader.getInstance()

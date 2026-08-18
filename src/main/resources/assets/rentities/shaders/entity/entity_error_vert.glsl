@@ -66,6 +66,11 @@ struct EntityInstance {
     vec4 armorStandRightArmPose;
     vec4 armorStandLeftLegPose;
     vec4 armorStandRightLegPose;
+
+    int packedLight;
+    float slimeScaleXZ;
+    float slimeScaleY;
+    int materialFlags;
 };
 layout(std430, binding = 12) buffer EntityInstanceBuffer { EntityInstance instances[]; };
 

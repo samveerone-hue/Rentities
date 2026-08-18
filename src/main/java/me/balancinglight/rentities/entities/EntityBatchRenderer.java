@@ -637,6 +637,8 @@ public class EntityBatchRenderer {
                     var meshInfo = meshInfoMap.get(currentType);
                     if (meshInfo != null) {
                         bindEntityTexture(currentType);
+                        boolean translucentSlime = currentType == EntityType.SLIME || currentType == EntityType.MAGMA_CUBE;
+                        glDepthMask(!translucentSlime);
                         glUniform1i(uBaseInstance, instanceOffset);
                         if (Rentities.IS_DEBUG && (System.currentTimeMillis() % 2000 < 50)) {
                             Rentities.LOGGER.info("DRAW: type={}, count={}, indexCount={}, indexOffset={}, baseInstance={}",
@@ -645,6 +647,7 @@ public class EntityBatchRenderer {
                         glDrawElementsInstanced(
                                 GL_TRIANGLES, meshInfo.indexCount, GL_UNSIGNED_INT,
                                 (long)meshInfo.indexOffset, currentCount);
+                        if (translucentSlime) glDepthMask(true);
                     } else {
                         if (Rentities.IS_DEBUG) {
                             Rentities.LOGGER.warn("SKIP_NO_MESH: type={}, count={} — no meshInfo found!", currentType, currentCount);

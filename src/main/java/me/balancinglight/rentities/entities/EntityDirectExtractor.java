@@ -15,6 +15,7 @@ import net.minecraft.world.entity.TamableAnimal;
 import net.minecraft.world.entity.animal.armadillo.Armadillo;
 import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.entity.monster.Creeper;
+import net.minecraft.world.entity.monster.Slime;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ItemUseAnimation;
 import net.minecraft.world.phys.Vec3;
@@ -161,6 +162,20 @@ public final class EntityDirectExtractor {
         float swellAmount = 0f;
         float explodeProgress = 0f;
         float rollProgress = 0f;
+        int packedLight = 0;
+        float slimeScaleXZ = 1f;
+        float slimeScaleY = 1f;
+        try {
+            net.minecraft.client.renderer.entity.EntityRenderer renderer = Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(entity);
+            if (renderer != null) packedLight = renderer.getLight(entity, partialTick);
+        } catch (Throwable ignored) {}
+        if (entity instanceof Slime slime) {
+            float stretch = net.minecraft.util.Mth.lerp(partialTick, slime.oSquish, slime.squish);
+            float inv = 1.0f / (stretch / 4.0f + 1.0f);
+            float size = slime.getSize();
+            slimeScaleXZ = size * inv;
+            slimeScaleY = size / inv;
+        }
 
         /*
          * Armor-stand pose data is not derived from the normal LivingEntity animation

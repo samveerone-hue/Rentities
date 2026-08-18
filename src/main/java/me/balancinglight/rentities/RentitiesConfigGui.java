@@ -13,17 +13,12 @@ import net.minecraft.resources.Identifier;
 public class RentitiesConfigGui implements ConfigEntryPoint {
 
     private static final RentitiesConfigStore store = new RentitiesConfigStore();
+    private final StorageEventHandler saveConfig = store::save;
     private final StorageEventHandler noSave = () -> {};
 
     @Override
     public void registerConfigLate(ConfigBuilder builder) {
-        Rentities.LOGGER.info("Registering Rentities Sodium configuration");
-        // Use explicit ownership instead of registerOwnModOptions() so older 0.8.x
-        // Sodium API builds do not depend on metadata-owner inference.
-        var modOptions = builder.registerModOptions("rentities", "Rentities",
-                net.fabricmc.loader.api.FabricLoader.getInstance().getModContainer("rentities")
-                        .map(c -> c.getMetadata().getVersion().getFriendlyString())
-                        .orElse("unknown"));
+        Rentities.LOGGER.info("[Rentities] Sodium config registration started");
         var page = builder.createOptionPage()
                 .setName(Component.literal("Rentities"));
 
@@ -130,9 +125,9 @@ public class RentitiesConfigGui implements ConfigEntryPoint {
                 .setStorageHandler(noSave)
         );
 
-        modOptions
+        builder.registerModOptions("rentities")
                 .setColorTheme(builder.createColorTheme().setBaseThemeRGB(0x76B900))
                 .addPage(page);
-        Rentities.LOGGER.info("Rentities Sodium configuration registered");
+        Rentities.LOGGER.info("[Rentities] Sodium config registration complete");
     }
 }

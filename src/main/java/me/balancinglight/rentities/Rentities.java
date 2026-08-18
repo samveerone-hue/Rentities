@@ -28,8 +28,6 @@ public class Rentities implements ClientModInitializer {
             LOGGER.info("GPU: {} — {}", vendor, renderer);
             boolean isNvidia = vendor != null && vendor.toUpperCase().contains("NVIDIA");
             IS_COMPATIBLE = isNvidia;
-            LOGGER.info("Rentities OpenGL capability check: vendor={}, renderer={}, compatible={}",
-                    vendor, renderer, IS_COMPATIBLE);
             if (!isNvidia) {
                 LOGGER.warn("Rentities requires an NVIDIA GPU. Detected: {}. Disabled.", vendor);
                 IS_ENABLED = false;
@@ -38,8 +36,6 @@ public class Rentities implements ClientModInitializer {
         }
         // Always sync IS_ENABLED from config — covers toggle on/off via settings
         IS_ENABLED = IS_COMPATIBLE && config.entity_batching_enabled;
-        LOGGER.info("Rentities state: compatible={}, configured={}, enabled={}",
-                IS_COMPATIBLE, config.entity_batching_enabled, IS_ENABLED);
     }
 }
 

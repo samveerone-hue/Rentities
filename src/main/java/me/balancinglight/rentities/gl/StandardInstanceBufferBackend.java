@@ -29,7 +29,7 @@ public final class StandardInstanceBufferBackend implements InstanceBufferBacken
         this.id = glCreateBuffers();
         glNamedBufferStorage(id, total, GL_DYNAMIC_STORAGE_BIT);
         this.stagingAddr = MemoryUtil.nmemAlloc(total);
-        MemoryUtil.nmemSet(stagingAddr, 0, total);
+        MemoryUtil.memSet(stagingAddr, 0, total);
     }
 
     public int id() { return id; }

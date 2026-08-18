@@ -98,6 +98,7 @@ public class EntityBatchRenderer {
     private int uViewProjection = -1;
     private int uGameTime = -1;
     private int uEntityTextures = -1; // sampler2D uEntityTexture — bound per draw call
+    private int lastBoundGlTexId = 0;
     private int uBaseInstance  = -1;
     private int uIndirect      = -1;
 

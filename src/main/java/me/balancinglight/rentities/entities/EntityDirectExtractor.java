@@ -109,11 +109,25 @@ public final class EntityDirectExtractor {
         long ptr = EntityBatchRenderer.reserveInstance(type);
         if (ptr == 0L) return false;
 
-        write(ptr, entity, type, partialTick);
+        if (!write(ptr, entity, type, partialTick)) {
+            EntityBatchRenderer.releaseReservedInstance(type);
+            return false;
+        }
         return true;
     }
 
-    private static void write(long ptr, Entity entity, EntityType<?> type, float partialTick) {
+    private static boolean write(long ptr, Entity entity, EntityType<?> type, float partialTick) {
+        try {
+            return writeInternal(ptr, entity, type, partialTick);
+        } catch (Throwable t) {
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.warn("[Rentities] Direct entity extraction failed for {}: {}", type, t.getMessage());
+            }
+            return false;
+        }
+    }
+
+    private static boolean writeInternal(long ptr, Entity entity, EntityType<?> type, float partialTick) {
         Vec3 pos = entity.getPosition(partialTick);
 
         MemoryUtil.memPutFloat(
@@ -466,6 +480,8 @@ public final class EntityDirectExtractor {
         MemoryUtil.memPutFloat(
                 ptr + EntityInstance.OFFSET_TEX_SCALE_Y,
                 1f);
+
+        return true;
     }
 
     /**

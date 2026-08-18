@@ -100,6 +100,26 @@ uniform float uGameTime;
 // Only used by the direct-draw fallback path.
 uniform int uBaseInstance;
 uniform int uIndirect;
+uniform int uAnimationLodEnabled;
+uniform float uAnimationLodMediumDistance;
+uniform float uAnimationLodFarDistance;
+uniform float uAnimationLodMediumScale;
+
+float gWalkSin;
+float gWalkCos;
+float gSlowWalkSin;
+float gSlowWalkCos;
+float gAnimationAmountScale = 1.0;
+
+int getAnimationLod(vec3 p) {
+    if (uAnimationLodEnabled == 0) return 0;
+    float d2 = dot(p, p);
+    float m2 = max(uAnimationLodMediumDistance, 0.0);
+    float f2 = max(uAnimationLodFarDistance, m2);
+    if (d2 >= f2 * f2) return 2;
+    if (d2 >= m2 * m2) return 1;
+    return 0;
+}
 
 out vec2      vTexCoord;
 out flat int  vFlags;
@@ -287,13 +307,13 @@ mat4 getArmorStandBone(int b, EntityInstance inst) {
 // --- BIPED ---
 mat4 getBipedBone(int b, EntityInstance inst) {
     float sw = inst.limbSwing;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
 
     // Vanilla HumanoidModel uses cosine with a PI phase offset for the
     // right-side limbs. Using sine here made every biped's walk cycle visibly
     // phase-shifted compared with vanilla.
     float w1 = sa > 0.01
-        ? cos(sw * 0.6662) * 1.4 * sa
+        ? gWalkCos * 1.4 * sa
         : 0.0;
 
     float w2 = sa > 0.01
@@ -360,7 +380,7 @@ mat4 getBipedBone(int b, EntityInstance inst) {
 // --- QUADRUPED ---
 mat4 getQuadBone(int b, EntityInstance inst) {
     float sw = inst.limbSwing;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
     vec3 p = getP(inst, b);
 
     if (b == BONE_HEAD) {
@@ -398,11 +418,11 @@ mat4 getQuadBone(int b, EntityInstance inst) {
 // --- HORSE ---
 mat4 getHorseBone(int b, EntityInstance inst) {
     float sw = inst.limbSwing;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
     vec3 p = getP(inst, b);
 
     if (b == BONE_HEAD) {
-        float nod = sin(sw * 0.8) * sa * 0.3;
+        float nod = gSlowWalkSin * sa * 0.3;
         mat4 r =
             rotX(nod + inst.headPitch) *
             rotY(inst.headYaw);
@@ -437,13 +457,13 @@ mat4 getHorseBone(int b, EntityInstance inst) {
 mat4 getBirdBone(int b, EntityInstance inst) {
     float t = uGameTime * 0.1;
     float sw = inst.limbSwing;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
     vec3 p = getP(inst, b);
 
     if (b == BONE_HEAD)
         return pivotRot(
             p,
-            rotX(sin(sw * 0.6662) * sa * 0.5 + inst.headPitch));
+            rotX(gWalkSin * sa * 0.5 + inst.headPitch));
 
     if (b == BONE_ARM_L) {
         float f = sa < 0.01
@@ -464,7 +484,7 @@ mat4 getBirdBone(int b, EntityInstance inst) {
     if (b == BONE_LEG_L)
         return pivotRot(
             p,
-            rotX(sin(sw * 0.6662) * sa * 0.8));
+            rotX(gWalkSin * sa * 0.8));
 
     if (b == BONE_LEG_R)
         return pivotRot(
@@ -477,7 +497,7 @@ mat4 getBirdBone(int b, EntityInstance inst) {
 // --- ARTHROPOD ---
 mat4 getArthropodBone(int b, EntityInstance inst) {
     float sw = inst.limbSwing;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
     float t = uGameTime * 0.15;
     vec3 p = getP(inst, b);
 
@@ -534,7 +554,7 @@ mat4 getInsectBone(int b, EntityInstance inst) {
 // --- WORM ---
 mat4 getWormBone(int b, EntityInstance inst) {
     float sw = inst.limbSwing;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
     float t = uGameTime * 0.1;
 
     float ph = aPosition.z * 0.3 + sw;
@@ -577,7 +597,7 @@ mat4 getAquaticLegsBone(int b, EntityInstance inst) {
         (inst.flags & FLAG_IN_WATER) != 0;
 
     float sw = inst.limbSwing;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
     float t = uGameTime * 0.1;
     vec3 p = getP(inst, b);
 
@@ -614,7 +634,7 @@ mat4 getAquaticLegsBone(int b, EntityInstance inst) {
 // --- SWIMMING ---
 mat4 getSwimmingBone(int b, EntityInstance inst) {
     float t = uGameTime * 0.1;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
 
     if (b >= 2)
         return transl(
@@ -637,7 +657,7 @@ mat4 getSwimmingBone(int b, EntityInstance inst) {
 // --- SLIME ---
 mat4 getSlimeBone(int b, EntityInstance inst) {
     float t = uGameTime * 0.1;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
     float bounce =
         abs(sin(t * 3.0 + inst.limbSwing));
 
@@ -727,7 +747,7 @@ mat4 getShulkerBone(int b, EntityInstance inst) {
 // --- STRIDER ---
 mat4 getStriderBone(int b, EntityInstance inst) {
     float sw = inst.limbSwing;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
     vec3 p = getP(inst, b);
 
     if (b == BONE_HEAD || b == BONE_BODY)
@@ -737,7 +757,7 @@ mat4 getStriderBone(int b, EntityInstance inst) {
     if (b == BONE_LEG_L)
         return pivotRot(
             p,
-            rotX(sin(sw * 0.6662) * sa * 1.2));
+            rotX(gWalkSin * sa * 1.2));
 
     if (b == BONE_LEG_R)
         return pivotRot(
@@ -750,7 +770,7 @@ mat4 getStriderBone(int b, EntityInstance inst) {
 // --- FROG ---
 mat4 getFrogBone(int b, EntityInstance inst) {
     float sw = inst.limbSwing;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
     float crouch =
         abs(sin(sw * 0.4)) * sa;
 
@@ -838,7 +858,7 @@ mat4 getArmadilloBone(int b, EntityInstance inst) {
 // --- CREEPER ---
 mat4 getCreeperBone(int b, EntityInstance inst) {
     float sw = inst.limbSwing;
-    float sa = inst.limbSwingAmount;
+    float sa = inst.limbSwingAmount * gAnimationAmountScale;
     float swell = inst.swellAmount;
     vec3 p = getP(inst, b);
 
@@ -967,6 +987,15 @@ void main() {
 
     EntityInstance inst = instances[instanceID];
 
+    float walk0662 = inst.limbSwing * 0.6662;
+    float walk08 = inst.limbSwing * 0.8;
+    gWalkSin = sin(walk0662);
+    gWalkCos = cos(walk0662);
+    gSlowWalkSin = sin(walk08);
+    gSlowWalkCos = cos(walk08);
+    int lod = getAnimationLod(vec3(inst.posX, inst.posY, inst.posZ));
+    gAnimationAmountScale = lod == 1 ? clamp(uAnimationLodMediumScale, 0.0, 1.0) : 1.0;
+
     int bone = int(aBoneIndex);
 
     /*
@@ -981,6 +1010,9 @@ void main() {
             inst.animationCategory,
             bone,
             inst);
+    if (lod >= 2 && bone != BONE_HEAD) {
+        bt = mat4(1.0);
+    }
 
     vec3 localPos =
         (bt * vec4(aPosition, 1.0)).xyz;

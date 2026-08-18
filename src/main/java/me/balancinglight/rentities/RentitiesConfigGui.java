@@ -75,6 +75,24 @@ public class RentitiesConfigGui implements ConfigEntryPoint {
                 .setStorageHandler(noSave)
         );
 
+        page.addOption(
+            builder.createBooleanOption(Identifier.parse("rentities:animation_lod"))
+                .setName(Component.literal("Fast Animation LOD"))
+                .setTooltip(Component.literal(
+                    "Reduces animation work at distance while keeping GPU entity batching."))
+                .setDefaultValue(true)
+                .setImpact(OptionImpact.HIGH)
+                .setEnabledProvider(c -> Rentities.IS_COMPATIBLE)
+                .setBinding(
+                    value -> {
+                        store.getData().fast_animation_lod_enabled = value;
+                        store.save();
+                    },
+                    () -> store.getData().fast_animation_lod_enabled
+                )
+                .setStorageHandler(noSave)
+        );
+
         // Cache status — read only
         page.addOption(
             builder.createBooleanOption(Identifier.parse("rentities:cache_status"))

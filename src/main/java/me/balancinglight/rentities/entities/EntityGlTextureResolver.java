@@ -7,6 +7,8 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Resolves OpenGL texture names from Minecraft {@code ResourceLocation} keys.
@@ -19,11 +21,16 @@ public final class EntityGlTextureResolver {
     private static Method getTexMethod = null;
     private static MethodHandle gpuTexGetter = null;
     private static MethodHandle gpuTexIdGetter = null;
+    private static final Map<String, Integer> GL_ID_CACHE = new ConcurrentHashMap<>();
 
     private EntityGlTextureResolver() {}
 
     public static int resolveGlId(Object loc) {
         if (loc == null) return 0;
+        String key = String.valueOf(loc);
+        Integer cached = GL_ID_CACHE.get(key);
+        if (cached != null && cached > 0 && org.lwjgl.opengl.GL11.glIsTexture(cached)) return cached;
+        if (cached != null) GL_ID_CACHE.remove(key, cached);
         ensureMethods(loc);
         if (textureManager == null || bindTexMethod == null || getTexMethod == null) return 0;
 
@@ -39,7 +46,7 @@ public final class EntityGlTextureResolver {
             if (gpuTex == null) return 0;
 
             int glId = readGpuTexId(gpuTex);
-            if (glId > 0) return glId;
+            if (glId > 0) { GL_ID_CACHE.put(key, glId); return glId; }
         } catch (Throwable t) {
             if (Rentities.IS_DEBUG) {
                 Rentities.LOGGER.warn("resolveGlId failed for {}: {}", loc, t.getMessage());
@@ -50,7 +57,18 @@ public final class EntityGlTextureResolver {
         // requested location first. Otherwise returning GL_TEXTURE_BINDING_2D could make a
         // failed lookup render an unrelated texture left behind by another draw call.
         if (!boundRequestedTexture) return 0;
-        return org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL11.GL_TEXTURE_BINDING_2D);
+        int bound = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL11.GL_TEXTURE_BINDING_2D);
+        if (bound > 0) GL_ID_CACHE.put(key, bound);
+        return bound;
+    }
+
+    public static void invalidateCache() {
+        GL_ID_CACHE.clear();
+        textureManager = null;
+        bindTexMethod = null;
+        getTexMethod = null;
+        gpuTexGetter = null;
+        gpuTexIdGetter = null;
     }
 
     private static void ensureMethods(Object loc) {

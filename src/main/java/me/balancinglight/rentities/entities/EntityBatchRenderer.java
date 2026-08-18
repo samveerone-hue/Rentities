@@ -5,6 +5,7 @@ import me.balancinglight.rentities.gl.GlShader;
 import me.balancinglight.rentities.gl.GlStateGuard;
 import me.balancinglight.rentities.gl.GpuFenceRing;
 import me.balancinglight.rentities.gl.GpuRingBuffer;
+import me.balancinglight.rentities.gl.GlStateCache;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.EntityType;
 import org.joml.Matrix4f;
@@ -78,6 +79,7 @@ public class EntityBatchRenderer {
     private final GpuRingBuffer instanceRing;
     private final GpuFenceRing fenceRing = new GpuFenceRing(NUM_BUFFERS);
     private final EntityCullingPipeline cullPipeline;
+    private final GlStateCache stateCache = new GlStateCache();
     private static final int SSBO_BINDING = 12;
     private static final int PIVOT_SSBO_BINDING = 13;
 
@@ -95,6 +97,10 @@ public class EntityBatchRenderer {
     private int uEntityTextures = -1; // sampler2D uEntityTexture — bound per draw call
     private int uBaseInstance  = -1;
     private int uIndirect      = -1;
+    private int uAnimationLodEnabled = -1;
+    private int uAnimationLodMediumDistance = -1;
+    private int uAnimationLodFarDistance = -1;
+    private int uAnimationLodMediumScale = -1;
 
     private final EntityMeshBaker meshBaker;
     private final EntityErrorRenderer errorRenderer;
@@ -186,6 +192,19 @@ public class EntityBatchRenderer {
         extractionTypes[idx] = type;
         queuedOriginalIndices[idx] = idx;
         return extractionBuffer + (long) idx * EntityInstance.STRIDE;
+    }
+
+    /** Rolls back the most recently reserved slot when direct extraction fails. */
+    public static void releaseReservedInstance(EntityType<?> type) {
+        if (INSTANCE == null) return;
+        int idx = queueSize.get();
+        if (idx <= 0) return;
+        int slot = idx - 1;
+        if (queuedTypes[slot] != type || extractionTypes[slot] != type) return;
+        queuedTypes[slot] = null;
+        extractionTypes[slot] = null;
+        queuedOriginalIndices[slot] = 0;
+        queueSize.decrementAndGet();
     }
 
     public static boolean queueEntityState(Object state, double x, double y, double z) {
@@ -324,7 +343,7 @@ public class EntityBatchRenderer {
         stateGuard.capture();
         try {
             // Bind shader and upload uniforms
-            entityShader.bind();
+            glUseProgram(entityShader.id);
             float[] vp = vpFloats;
             if (storedViewProjection != null) storedViewProjection.get(vp);
             glUniformMatrix4fv(uViewProjection, false, vp);
@@ -335,6 +354,10 @@ public class EntityBatchRenderer {
                     ? (float)(mc.level.getGameTime() % 100000L) + partialTick
                     : partialTick;
             glUniform1f(uGameTime, gameTime);
+            if (uAnimationLodEnabled >= 0) glUniform1i(uAnimationLodEnabled, Rentities.config.fast_animation_lod_enabled ? 1 : 0);
+            if (uAnimationLodMediumDistance >= 0) glUniform1f(uAnimationLodMediumDistance, Rentities.config.fast_animation_lod_medium_distance);
+            if (uAnimationLodFarDistance >= 0) glUniform1f(uAnimationLodFarDistance, Rentities.config.fast_animation_lod_far_distance);
+            if (uAnimationLodMediumScale >= 0) glUniform1f(uAnimationLodMediumScale, Rentities.config.fast_animation_lod_medium_scale);
 
             // Bind SSBOs
         glBindBufferRange(
@@ -384,7 +407,7 @@ public class EntityBatchRenderer {
             // Bind VAO and draw
             int vaoId = meshBaker.getVaoId();
             if (vaoId != 0) {
-                glBindVertexArray(vaoId);
+                stateCache.bindVertexArray(vaoId);
             
                 // Ensure correct GL state for entity rendering
                 glEnable(GL_DEPTH_TEST);
@@ -409,7 +432,7 @@ public class EntityBatchRenderer {
                     indirect = renderIndirect(count, bufIdx);
                 }
                 if (!indirect) {
-                    glUseProgram(entityShader.id);
+                    stateCache.useProgram(entityShader.id);
                     glUniform1i(uIndirect, 0);
                     renderBySortedEntityType(count);
                 }
@@ -504,7 +527,8 @@ public class EntityBatchRenderer {
 
         cullPipeline.dispatch(count, storedViewProjection);
 
-        glUseProgram(entityShader.id);
+        stateCache.reset();
+        stateCache.useProgram(entityShader.id);
         glUniform1i(uIndirect, 1);
         cullPipeline.bindForDraw();
 
@@ -826,16 +850,14 @@ public class EntityBatchRenderer {
 
     /** Binds texture unit 0 to 0 so a stale entity texture can never be re-sampled. */
     private void unbindTextureUnit0() {
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, 0);
+        stateCache.bindTextureUnit0(0);
         lastBoundGlTexId = 0;
     }
 
     private void bindTextureUnit0(int glId) {
-        if (glId <= 0 || glId == lastBoundGlTexId) return;
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, glId);
-        glUniform1i(uEntityTextures, 0);
+        if (glId <= 0) return;
+        stateCache.bindTextureUnit0(glId);
+        if (uEntityTextures >= 0) glUniform1i(uEntityTextures, 0);
         lastBoundGlTexId = glId;
     }
     
@@ -1020,13 +1042,19 @@ public class EntityBatchRenderer {
                     .vert(vertSrc)
                     .frag(fragSrc)
                     .compile();
-            entityShader.bind();
+            stateCache.reset();
+            stateCache.useProgram(entityShader.id);
             uViewProjection = entityShader.getUniformLocation("uViewProjection");
             uGameTime       = entityShader.getUniformLocation("uGameTime");
             uEntityTextures = entityShader.getUniformLocation("uEntityTexture");
             uBaseInstance   = entityShader.getUniformLocation("uBaseInstance");
             uIndirect       = entityShader.getUniformLocation("uIndirect");
+            uAnimationLodEnabled = entityShader.getUniformLocation("uAnimationLodEnabled");
+            uAnimationLodMediumDistance = entityShader.getUniformLocation("uAnimationLodMediumDistance");
+            uAnimationLodFarDistance = entityShader.getUniformLocation("uAnimationLodFarDistance");
+            uAnimationLodMediumScale = entityShader.getUniformLocation("uAnimationLodMediumScale");
             glUseProgram(0);
+            stateCache.reset();
         } catch (Exception e) {
             Rentities.LOGGER.error("Entity shader compilation failed", e);
             entityShader = null;
@@ -1062,6 +1090,7 @@ public class EntityBatchRenderer {
         instanceRing.delete();
         cullPipeline.delete();
         if (extractionBuffer != 0) MemoryUtil.nmemFree(extractionBuffer);
+        EntityGlTextureResolver.invalidateCache();
         meshBaker.delete();
         errorRenderer.delete();
         textureAtlas.delete();

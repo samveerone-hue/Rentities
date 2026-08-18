@@ -11,6 +11,7 @@ public class Rentities implements ClientModInitializer {
 
     public static volatile boolean IS_ENABLED    = false;
     public static volatile boolean IS_COMPATIBLE = false;
+    public static volatile RendererCapabilityState CAPABILITIES;
 
     public static RentitiesConfig config = RentitiesConfig.loadOrCreate();
 
@@ -21,21 +22,26 @@ public class Rentities implements ClientModInitializer {
     }
 
     public static void checkAndEnable() {
-        if (!IS_COMPATIBLE) {
-            // First time — detect GPU
-            String vendor = org.lwjgl.opengl.GL11.glGetString(org.lwjgl.opengl.GL11.GL_VENDOR);
-            String renderer = org.lwjgl.opengl.GL11.glGetString(org.lwjgl.opengl.GL11.GL_RENDERER);
-            LOGGER.info("GPU: {} — {}", vendor, renderer);
-            boolean isNvidia = vendor != null && vendor.toUpperCase().contains("NVIDIA");
-            IS_COMPATIBLE = isNvidia;
-            if (!isNvidia) {
-                LOGGER.warn("Rentities requires an NVIDIA GPU. Detected: {}. Disabled.", vendor);
-                IS_ENABLED = false;
-                return;
-            }
+        if (CAPABILITIES == null) {
+            CAPABILITIES = RendererCapabilityState.probe();
+            IS_COMPATIBLE = CAPABILITIES.isProbed();
+            LOGGER.info("[Rentities] renderer capability state: {}", CAPABILITIES.describe());
         }
-        // Always sync IS_ENABLED from config — covers toggle on/off via settings
-        IS_ENABLED = IS_COMPATIBLE && config.entity_batching_enabled;
+        IS_ENABLED = IS_COMPATIBLE && config.entity_batching_enabled &&
+                CAPABILITIES.choosePath(config) != RendererCapabilityState.RenderPath.VANILLA;
+    }
+
+    public static boolean shouldInterceptEntity() {
+        if (!IS_COMPATIBLE || !config.entity_batching_enabled || CAPABILITIES == null) return false;
+        return CAPABILITIES.choosePath(config) != RendererCapabilityState.RenderPath.VANILLA;
+    }
+
+    public static void disableFeature(RendererCapabilityState.Feature feature, Throwable error) {
+        if (CAPABILITIES != null) CAPABILITIES.markFailed(feature, error);
+        if (feature == RendererCapabilityState.Feature.GPU_BATCHING && CAPABILITIES != null &&
+                CAPABILITIES.choosePath(config) == RendererCapabilityState.RenderPath.VANILLA) {
+            IS_ENABLED = false;
+        }
     }
 }
 

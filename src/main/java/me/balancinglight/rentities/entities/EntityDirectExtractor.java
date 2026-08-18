@@ -88,7 +88,9 @@ public final class EntityDirectExtractor {
         EntityType<?> type = entity.getType();
         if (EntityBatchRegistry.getCategory(type) == EntityAnimationCategory.CPU_ANIMATED) return false;
         if (!renderer.hasMeshFor(type)) return false;
-        if (!renderer.entityTextureLocs.containsKey(type)) return false;
+        // Never cancel vanilla unless the complete GPU preflight is valid. A texture
+        // ResourceLocation alone is insufficient; the GL texture must be live.
+        if (!renderer.canBatchEntity(type)) return false;
 
         /*
          * The current GPU mesh path deliberately bakes only the entity itself.

@@ -55,6 +55,22 @@ public class RentitiesConfigGui implements ConfigEntryPoint {
                 .setStorageHandler(noSave) // already saved manually above
         );
 
+        page.addOption(
+            builder.createBooleanOption(Identifier.parse("rentities:gpu_culling"))
+                .setName(Component.literal("GPU Frustum Culling"))
+                .setTooltip(Component.literal(
+                    "Uses the compute shader to reject off-screen entities before indirect draws. " +
+                    "Disables independently and falls back to CPU instancing if it fails."))
+                .setDefaultValue(true)
+                .setImpact(OptionImpact.HIGH)
+                .setEnabledProvider(c -> Rentities.IS_COMPATIBLE)
+                .setBinding(
+                    value -> { store.getData().gpu_frustum_culling_enabled = value; store.save(); },
+                    () -> store.getData().gpu_frustum_culling_enabled
+                )
+                .setStorageHandler(noSave)
+        );
+
         // Scan mode — needs reload to take effect (changes what happens at world load)
         page.addOption(
             builder.createBooleanOption(Identifier.parse("rentities:scan_mode"))

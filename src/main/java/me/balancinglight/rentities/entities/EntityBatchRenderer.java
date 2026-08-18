@@ -1,10 +1,15 @@
 package me.balancinglight.rentities.entities;
 
 import me.balancinglight.rentities.Rentities;
+import me.balancinglight.rentities.RendererCapabilityState;
 import me.balancinglight.rentities.gl.GlShader;
 import me.balancinglight.rentities.gl.GlStateGuard;
 import me.balancinglight.rentities.gl.GpuFenceRing;
-import me.balancinglight.rentities.gl.GpuRingBuffer;
+import me.balancinglight.rentities.gl.InstanceBufferBackend;
+import me.balancinglight.rentities.gl.PersistentMappedInstanceBufferBackend;
+import me.balancinglight.rentities.gl.StandardInstanceBufferBackend;
+import me.balancinglight.rentities.gl.GpuSync;
+import me.balancinglight.rentities.gl.GlStateCache;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.EntityType;
 import org.joml.Matrix4f;
@@ -64,7 +69,6 @@ public class EntityBatchRenderer {
     public static org.joml.Matrix4f storedViewProjection;
     private boolean textureCacheLoaded = false;
     private boolean passPrepared = false;
-    private int lastBoundGlTexId = 0;
 
     /**
      * Three slots is the sweet spot for a persistently mapped ring: two lets the CPU run
@@ -75,9 +79,10 @@ public class EntityBatchRenderer {
     private static final int NUM_BUFFERS = 3;
     // Pre-allocated to avoid per-frame heap allocation
     private final float[] vpFloats = new float[16];
-    private final GpuRingBuffer instanceRing;
+    private final InstanceBufferBackend instanceBuffer;
     private final GpuFenceRing fenceRing = new GpuFenceRing(NUM_BUFFERS);
     private final EntityCullingPipeline cullPipeline;
+    private final GlStateCache stateCache = new GlStateCache();
     private static final int SSBO_BINDING = 12;
     private static final int PIVOT_SSBO_BINDING = 13;
 
@@ -123,11 +128,39 @@ public class EntityBatchRenderer {
         this.textureAtlas = new EntityTextureAtlas();
         this.skinCache = new EntitySkinCache();
 
-        // One immutable allocation, three slots, mapped once for the lifetime of the mod.
-        // No GL_CLIENT_STORAGE_BIT: that pins system RAM and pushes the driver towards a
-        // host copy per draw on NVIDIA.
-        this.instanceRing = new GpuRingBuffer(EntityInstance.SSBO_SIZE, NUM_BUFFERS, true);
-        this.cullPipeline = new EntityCullingPipeline(NUM_BUFFERS, EntityInstance.MAX_INSTANCES);
+        // Prefer persistent mapping, but retain a standard SSBO upload backend so GPU
+        // batching can survive on drivers that expose the required GL 4.3 path without
+        // reliable persistent mapping. The backend is isolated from entity extraction.
+        InstanceBufferBackend selected;
+        try {
+            if (Rentities.CAPABILITIES != null && Rentities.CAPABILITIES.persistentMappingAllowed()) {
+                selected = new PersistentMappedInstanceBufferBackend(EntityInstance.SSBO_SIZE, NUM_BUFFERS);
+            } else {
+                selected = new StandardInstanceBufferBackend(EntityInstance.SSBO_SIZE, NUM_BUFFERS);
+            }
+        } catch (Throwable t) {
+            if (Rentities.CAPABILITIES != null) {
+                Rentities.CAPABILITIES.markFailed(RendererCapabilityState.Feature.PERSISTENT_MAPPING, t);
+            }
+            try {
+                selected = new StandardInstanceBufferBackend(EntityInstance.SSBO_SIZE, NUM_BUFFERS);
+            } catch (Throwable fallbackError) {
+                if (Rentities.CAPABILITIES != null) {
+                    Rentities.CAPABILITIES.markFailed(RendererCapabilityState.Feature.GPU_BATCHING, fallbackError);
+                }
+                throw fallbackError;
+            }
+        }
+        this.instanceBuffer = selected;
+        EntityCullingPipeline culling = null;
+        if (Rentities.CAPABILITIES == null || Rentities.CAPABILITIES.indirectAllowed(Rentities.config)) {
+            try {
+                culling = new EntityCullingPipeline(NUM_BUFFERS, EntityInstance.MAX_INSTANCES);
+            } catch (Throwable t) {
+                Rentities.disableFeature(RendererCapabilityState.Feature.INDIRECT_CULLING, t);
+            }
+        }
+        this.cullPipeline = culling;
 
         extractionBuffer = MemoryUtil.nmemAlloc(EntityInstance.SSBO_SIZE);
         compileShader();
@@ -305,7 +338,7 @@ public class EntityBatchRenderer {
         // Sorted-order copy straight into the mapped slot. The contiguous run index is
         // also written into the existing texture-layer slot so the culling shader can
         // address its DrawGroup directly without a per-instance binary search.
-        long slotAddr = instanceRing.addrOf(bufIdx);
+        long slotAddr = instanceBuffer.addrOf(bufIdx);
         EntityType<?> previousType = null;
         int groupIndex = -1;
         var meshInfoMap = meshBaker.getMeshInfoMap();
@@ -329,10 +362,14 @@ public class EntityBatchRenderer {
                             ? groupIndex : -1);
         }
 
+        instanceBuffer.upload(bufIdx, (long) count * EntityInstance.STRIDE);
+        GpuSync.afterCpuUploadBeforeShaderRead();
+
         stateGuard.capture();
+        stateCache.reset();
         try {
-            // Bind shader and upload uniforms
-            entityShader.bind();
+            // Bind shader and upload uniforms. Cache is only valid inside this guarded pass.
+            stateCache.useProgram(entityShader.id);
             float[] vp = vpFloats;
             if (storedViewProjection != null) storedViewProjection.get(vp);
             glUniformMatrix4fv(uViewProjection, false, vp);
@@ -348,9 +385,9 @@ public class EntityBatchRenderer {
         glBindBufferRange(
                 GL_SHADER_STORAGE_BUFFER,
                 SSBO_BINDING,
-                instanceRing.id(),
-                instanceRing.offsetOf(bufIdx),
-                instanceRing.slotSize());
+                instanceBuffer.id(),
+                instanceBuffer.offsetOf(bufIdx),
+                instanceBuffer.slotSize());
 
         /*
          * Static per-entity-type/per-bone pivot table.
@@ -392,7 +429,7 @@ public class EntityBatchRenderer {
             // Bind VAO and draw
             int vaoId = meshBaker.getVaoId();
             if (vaoId != 0) {
-                glBindVertexArray(vaoId);
+                stateCache.bindVertexArray(vaoId);
             
                 // Ensure correct GL state for entity rendering
                 glEnable(GL_DEPTH_TEST);
@@ -410,14 +447,19 @@ public class EntityBatchRenderer {
 
                 glColorMask(true, true, true, true);
 
-                lastBoundGlTexId = 0;
-
-                boolean indirect = cullPipeline.isAvailable() && storedViewProjection != null;
+    
+                boolean indirect = cullPipeline != null && cullPipeline.isAvailable() && storedViewProjection != null &&
+                        Rentities.CAPABILITIES != null && Rentities.CAPABILITIES.indirectAllowed(Rentities.config);
                 if (indirect) {
-                    indirect = renderIndirect(count, bufIdx);
+                    try {
+                        indirect = renderIndirect(count, bufIdx);
+                    } catch (Throwable t) {
+                        indirect = false;
+                        Rentities.disableFeature(RendererCapabilityState.Feature.INDIRECT_CULLING, t);
+                    }
                 }
                 if (!indirect) {
-                    glUseProgram(entityShader.id);
+                    stateCache.useProgram(entityShader.id);
                     glUniform1i(uIndirect, 0);
                     renderBySortedEntityType(count);
                 }
@@ -511,8 +553,9 @@ public class EntityBatchRenderer {
         if (groups == 0) return false;
 
         cullPipeline.dispatch(count, storedViewProjection);
+        stateCache.reset();
 
-        glUseProgram(entityShader.id);
+        stateCache.useProgram(entityShader.id);
         glUniform1i(uIndirect, 1);
         cullPipeline.bindForDraw();
 
@@ -597,7 +640,7 @@ public class EntityBatchRenderer {
     private static class StateAccessor {
         final java.lang.invoke.MethodHandle yaw, yawO, limbSwing, limbSwingAmt, headYaw, headYawO, headPitch, headPitchO, attackProgress;
         final java.lang.invoke.MethodHandle deathTime, swimProgress, hurtTime, sneaking;
-        final java.lang.invoke.MethodHandle type, texture, invisible, onGround, inWater;
+        final java.lang.invoke.MethodHandle type, invisible, onGround, inWater;
 
         StateAccessor(Class<?> cls) {
             this.yaw            = mhFloat(cls,   "bodyYaw", "yBodyRot", "field_53329", "M");
@@ -614,7 +657,6 @@ public class EntityBatchRenderer {
             this.hurtTime       = mhBool(cls,    "field_53456", "isHurt", "al");
             this.sneaking       = mhBool(cls,    "field_53455", "isSneaking", "ak");
             this.type           = requireObj(cls, "field_58171", "entityType", "H");
-            this.texture        = mhObj(cls,     "field_53336", "texture", "V");
             this.invisible      = mhBool(cls,    "field_53333", "invisible", "Q");
             this.onGround       = mhBool(cls,    "field_53334", "onGround", "R");
             this.inWater        = mhBool(cls,    "field_53335", "inWater", "S");
@@ -973,6 +1015,22 @@ public class EntityBatchRenderer {
         }
     }
 
+    public boolean canBatchEntity(EntityType<?> type) {
+        if (type == null || entityShader == null || uViewProjection < 0 || uEntityTextures < 0) return false;
+        if (Rentities.CAPABILITIES == null || Rentities.CAPABILITIES.choosePath(Rentities.config) == RendererCapabilityState.RenderPath.VANILLA) return false;
+        if (!meshBaker.getMeshInfoMap().containsKey(type) || entityTexFailed.contains(type)) return false;
+
+        Integer glId = entityGlTexIds.get(type);
+        if (glId != null && glId > 0 && glIsTexture(glId)) return true;
+
+        Object loc = entityTextureLocs.get(type);
+        if (loc == null) return false;
+        int resolved = EntityGlTextureResolver.resolveGlId(loc);
+        if (resolved <= 0 || !glIsTexture(resolved)) return false;
+        entityGlTexIds.put(type, resolved);
+        return true;
+    }
+
     public boolean hasMeshFor(EntityType<?> type) {
         return meshBaker.getMeshInfoMap().containsKey(type);
     }
@@ -989,8 +1047,8 @@ public class EntityBatchRenderer {
     public void delete() {
         if (entityShader != null) entityShader.delete();
         fenceRing.deleteAll();
-        instanceRing.delete();
-        cullPipeline.delete();
+        instanceBuffer.delete();
+        if (cullPipeline != null) cullPipeline.delete();
         if (extractionBuffer != 0) MemoryUtil.nmemFree(extractionBuffer);
         meshBaker.delete();
         errorRenderer.delete();

@@ -3,6 +3,7 @@ package me.balancinglight.rentities.entities;
 import me.balancinglight.rentities.Rentities;
 import me.balancinglight.rentities.gl.GlShader;
 import me.balancinglight.rentities.gl.GpuRingBuffer;
+import me.balancinglight.rentities.gl.GpuSync;
 import org.joml.Matrix4f;
 import org.joml.Vector4f;
 import org.lwjgl.system.MemoryUtil;
@@ -14,9 +15,6 @@ import static org.lwjgl.opengl.GL30C.glUniform1ui;
 import static org.lwjgl.opengl.GL20C.glUniform4fv;
 import static org.lwjgl.opengl.GL20C.glUseProgram;
 import static org.lwjgl.opengl.GL40C.GL_DRAW_INDIRECT_BUFFER;
-import static org.lwjgl.opengl.GL42C.GL_COMMAND_BARRIER_BIT;
-import static org.lwjgl.opengl.GL42C.glMemoryBarrier;
-import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BARRIER_BIT;
 import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER;
 import static org.lwjgl.opengl.GL43C.glDispatchCompute;
 import static org.lwjgl.opengl.GL45C.glBindBufferRange;
@@ -179,7 +177,7 @@ public final class EntityCullingPipeline {
 
         // The command buffer is consumed by the draw as indirect state and the index list as
         // an SSBO read, so both hazards have to be named here.
-        glMemoryBarrier(GL_COMMAND_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+        GpuSync.afterComputeBeforeIndirectDraw();
     }
 
     /** Binds the command buffer for indirect draws; the visible index SSBO stays bound. */

@@ -27,7 +27,7 @@ public abstract class MixinEntityRenderDispatcher {
             @Coerce Object buffers,
             CallbackInfo ci) {
 
-        if (!Rentities.IS_ENABLED) return;
+        if (!Rentities.shouldInterceptEntity()) return;
 
         /*
          * Some entities are rendered as part of another renderer rather than
@@ -57,8 +57,9 @@ public abstract class MixinEntityRenderDispatcher {
         if (category == EntityAnimationCategory.CPU_ANIMATED) return;
 
         EntityBatchRenderer renderer = EntityBatchRenderer.INSTANCE;
+        if (renderer == null) return;
 
-        if (renderer != null && !renderer.hasMeshFor(type)) {
+        if (!renderer.hasMeshFor(type)) {
             EntityMeshBaker.MeshStatus status = renderer.getMeshBaker().ensureMeshFor(type);
 
             // UNKNOWN/BUILDING means extraction is not ready yet. Let vanilla render this
@@ -72,6 +73,10 @@ public abstract class MixinEntityRenderDispatcher {
                 && !renderer.entityTexFailed.contains(type)) {
             tryResolveTexture(renderer, type, state);
         }
+
+        // Texture resolution is part of the preflight contract: an unresolved texture must
+        // never cancel vanilla rendering and leave only a hitbox visible.
+        if (!renderer.canBatchEntity(type)) return;
 
         boolean queued = EntityBatchRenderer.queueEntityStateDirect(state, x, y, z, type);
         if (Rentities.IS_DEBUG)
@@ -112,20 +117,26 @@ public abstract class MixinEntityRenderDispatcher {
             Object entityRenderer = null;
             try {
                 java.lang.reflect.Field rf = null;
-                Class<?> sc = this.getClass();
-                while (sc != null && sc != Object.class) {
-                    try { rf = sc.getDeclaredField("field_4696"); break; }
-                    catch (NoSuchFieldException ignored) { sc = sc.getSuperclass(); }
+                Class<?> dispatcherClass = net.minecraft.client.renderer.entity.EntityRenderDispatcher.class;
+                try { rf = dispatcherClass.getDeclaredField("field_4696"); }
+                catch (NoSuchFieldException ignored) {
+                    try { rf = dispatcherClass.getDeclaredField("renderers"); }
+                    catch (NoSuchFieldException ignored2) {}
                 }
                 if (rf != null) {
                     rf.setAccessible(true);
                     java.util.Map<?,?> map = (java.util.Map<?,?>) rf.get(this);
                     if (Rentities.IS_DEBUG)
                         Rentities.LOGGER.info("field_4696 map size={}", map.size());
-                    for (java.util.Map.Entry<?,?> entry : map.entrySet()) {
-                        if (entry.getKey() != null && targetKey.equals(entry.getKey().toString())) {
-                            entityRenderer = entry.getValue();
-                            break;
+                    // 1.21.11 keys this map by EntityType, not a string identifier.
+                    entityRenderer = map.get(type);
+                    if (entityRenderer == null) {
+                        // Compatibility fallback for unusual map implementations.
+                        for (java.util.Map.Entry<?,?> entry : map.entrySet()) {
+                            if (entry.getKey() == type || (entry.getKey() != null && type.equals(entry.getKey()))) {
+                                entityRenderer = entry.getValue();
+                                break;
+                            }
                         }
                     }
                 }
@@ -142,7 +153,9 @@ public abstract class MixinEntityRenderDispatcher {
                     for (java.lang.reflect.Method m : rc.getDeclaredMethods()) {
                         if (m.getParameterCount() == 1 &&
                             (m.getName().equals("method_3885") ||
-                             m.getName().equals("getTextureLocation"))) {
+                             m.getName().equals("getTexture") ||
+                             m.getName().equals("getTextureLocation") ||
+                             m.getName().equals("method_4216"))) {
                             m.setAccessible(true);
                             try {
                                 Object loc = m.invoke(entityRenderer, state);

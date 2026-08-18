@@ -40,9 +40,7 @@ public class EntityMeshBaker {
     private int pivotSSBOId = 0;
     private int currentBakingTypeIdx = -1;
 
-    private int vaoId;
-    private int vboId;
-    private int eboId;
+    private final EntityMeshGpuHandle gpuMesh = new EntityMeshGpuHandle();
 
     public static class MeshInfo {
         public final int vertexOffset; // byte offset in VBO
@@ -754,12 +752,11 @@ public class EntityMeshBaker {
 
     private void uploadToGPU(List<float[]> allVertices, List<int[]> allIndices,
                               int totalVertices, int totalIndices) {
-        if (vaoId != 0) glDeleteVertexArrays(vaoId);
-        if (vboId != 0) glDeleteBuffers(vboId);
-        if (eboId != 0) glDeleteBuffers(eboId);
-        vaoId = glCreateVertexArrays();
-        vboId = glCreateBuffers();
-        eboId = glCreateBuffers();
+        gpuMesh.delete();
+        int vaoId = glCreateVertexArrays();
+        int vboId = glCreateBuffers();
+        int eboId = glCreateBuffers();
+        gpuMesh.set(vaoId, vboId, eboId);
 
         long vboSize = (long) totalVertices * VERTEX_STRIDE;
         long eboSize = (long) totalIndices * 4L;
@@ -994,7 +991,7 @@ public class EntityMeshBaker {
         saveToCacheInternal(meshes);
     }
 
-    public int getVaoId() { return vaoId; }
+    public int getVaoId() { return gpuMesh.vao(); }
     public Map<EntityType<?>, MeshInfo> getMeshInfoMap() { return meshInfoMap; }
     public boolean isBaked() { return bakeState == BakeState.READY; }
     public BakeState getBakeState() { return bakeState; }
@@ -1223,8 +1220,6 @@ public class EntityMeshBaker {
 
     public void delete() {
         cacheExecutor.shutdown();
-        if (vaoId != 0) glDeleteVertexArrays(vaoId);
-        if (vboId != 0) glDeleteBuffers(vboId);
-        if (eboId != 0) glDeleteBuffers(eboId);
+        gpuMesh.delete();
     }
 }

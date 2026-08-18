@@ -12,7 +12,7 @@ public final class RendererBackendManager {
         if (cfg == null || !cfg.entity_batching_enabled) return Backend.VANILLA;
         if (cfg.rendererBackend == RentitiesConfig.RendererBackendMode.VANILLA ||
             cfg.rendererBackend == RentitiesConfig.RendererBackendMode.CPU) return Backend.VANILLA;
-        boolean gpu = Rentities.CAPABILITIES == null || Rentities.CAPABILITIES.gpuBatchingAllowed();
+        boolean gpu = Rentities.CAPABILITIES == null || Rentities.CAPABILITIES.gpuBatchingAllowed(Rentities.config);
         if (!gpu) return Backend.VANILLA;
         if (cfg.rendererBackend == RentitiesConfig.RendererBackendMode.INDIRECT) {
             boolean indirect = Rentities.CAPABILITIES != null &&

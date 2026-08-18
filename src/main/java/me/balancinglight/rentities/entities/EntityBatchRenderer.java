@@ -437,8 +437,19 @@ public class EntityBatchRenderer {
                 glColorMask(true, true, true, true);
 
     
-                boolean indirect = cullPipeline != null && cullPipeline.isAvailable() && storedViewProjection != null &&
-                        Rentities.CAPABILITIES != null && Rentities.CAPABILITIES.indirectAllowed(Rentities.config);
+                /*
+                 * Keep GPU entity batching on the proven instanced-draw path by default.
+                 * Ordinary mobs are the primary Rentities batch path; players are not
+                 * registered here and therefore do not enter this branch. The indirect
+                 * compute/culling backend remains available as an explicit opt-in
+                 * optimization, but it cannot make a valid batch disappear.
+                 */
+                boolean indirect = Rentities.config.entity_indirect_culling
+                        && cullPipeline != null
+                        && cullPipeline.isAvailable()
+                        && storedViewProjection != null
+                        && Rentities.CAPABILITIES != null
+                        && Rentities.CAPABILITIES.indirectAllowed(Rentities.config);
                 if (indirect) {
                     try {
                         indirect = renderIndirect(count, bufIdx);

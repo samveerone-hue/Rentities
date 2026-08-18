@@ -15,6 +15,7 @@ public class RentitiesConfig {
 
     // Entity batching
     public boolean entity_batching_enabled = true;
+    public boolean entity_indirect_culling = false;
     public boolean entity_scan_mode        = true;
     public boolean entity_batching_debug        = false;
     public boolean gpu_frustum_culling_enabled = true;

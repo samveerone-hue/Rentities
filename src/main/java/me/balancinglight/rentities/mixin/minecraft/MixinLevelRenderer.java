@@ -47,6 +47,15 @@ public class MixinLevelRenderer {
             @Coerce Object fogColor,
             boolean renderSky,
             CallbackInfo ci) {
+        // Re-check here as well as in LevelRenderer construction. Some Sodium/render
+        // stacks construct LevelRenderer before the usable OpenGL context is fully
+        // initialized; doing the check lazily at the actual world-render boundary
+        // prevents Rentities from silently remaining uninitialized.
+        Rentities.checkAndEnable();
+        if (Rentities.IS_ENABLED && EntityBatchRenderer.INSTANCE == null) {
+            new EntityBatchRenderer();
+            Rentities.LOGGER.info("Renderer created at world-render boundary");
+        }
         if (!Rentities.IS_ENABLED || EntityBatchRenderer.INSTANCE == null) return;
 
         Vec3 camPos = camera.position();

@@ -166,8 +166,8 @@ public final class EntityDirectExtractor {
         float slimeScaleXZ = 1f;
         float slimeScaleY = 1f;
         try {
-            net.minecraft.client.renderer.entity.EntityRenderer renderer = Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(entity);
-            if (renderer != null) packedLight = renderer.getLight(entity, partialTick);
+            var dispatcher = Minecraft.getInstance().getEntityRenderDispatcher();
+            packedLight = dispatcher.getPackedLightCoords(entity, partialTick);
         } catch (Throwable ignored) {}
         if (entity instanceof Slime slime) {
             float stretch = net.minecraft.util.Mth.lerp(partialTick, slime.oSquish, slime.squish);

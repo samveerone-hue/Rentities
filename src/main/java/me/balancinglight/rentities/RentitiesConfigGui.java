@@ -22,36 +22,6 @@ public class RentitiesConfigGui implements ConfigEntryPoint {
         var page = builder.createOptionPage()
                 .setName(Component.literal("Rentities"));
 
-        // Master switch — immediately returns all entity rendering to vanilla when disabled.
-        page.addOption(
-            builder.createBooleanOption(Identifier.parse("rentities:enabled"))
-                .setName(Component.literal("Enable Rentities"))
-                .setTooltip(Component.literal(
-                    "Master switch. OFF disables Rentities interception and restores vanilla entity rendering."))
-                .setDefaultValue(true)
-                .setImpact(OptionImpact.HIGH)
-                .setEnabledProvider(c -> Rentities.IS_COMPATIBLE)
-                .setBinding(
-                    value -> {
-                        store.getData().rentities_enabled = value;
-                        store.save();
-                        if (!value) {
-                            Rentities.IS_ENABLED = false;
-                            if (EntityBatchRenderer.INSTANCE != null) {
-                                EntityBatchRenderer.INSTANCE.delete();
-                            }
-                        } else {
-                            Rentities.checkAndEnable();
-                            if (Rentities.IS_ENABLED && EntityBatchRenderer.INSTANCE == null) {
-                                new EntityBatchRenderer();
-                            }
-                        }
-                    },
-                    () -> store.getData().rentities_enabled
-                )
-                .setStorageHandler(noSave)
-        );
-
         // Master toggle — takes effect immediately, no reload needed
         page.addOption(
             builder.createBooleanOption(Identifier.parse("rentities:entity_batching"))

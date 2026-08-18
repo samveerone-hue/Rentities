@@ -61,14 +61,6 @@ public class MixinLevelRenderer {
     private void extractEntityDirect(Entity entity, float partialTick,
                                      CallbackInfoReturnable<EntityRenderState> cir) {
         if (!Rentities.IS_ENABLED) return;
-        // Zoomify and other camera mods can update the active camera after the LevelRenderer
-        // world-render HEAD hook. Refresh here so entity positions remain camera-relative to
-        // the same camera state vanilla is about to use for this entity render.
-        Camera activeCamera = net.minecraft.client.Minecraft.getInstance().gameRenderer.getMainCamera();
-        Vec3 activeCameraPos = activeCamera.position();
-        EntityBatchRenderer.cameraX = activeCameraPos.x;
-        EntityBatchRenderer.cameraY = activeCameraPos.y;
-        EntityBatchRenderer.cameraZ = activeCameraPos.z;
         EntityBatchRenderer.ensurePrepared();
         if (EntityDirectExtractor.tryExtract(entity, partialTick)) {
             cir.setReturnValue(EntityDirectExtractor.SENTINEL);

@@ -32,6 +32,7 @@ public final class EntityTextureBootstrap {
 
             Object loc = resolveTexture(entityRenderer, type);
             if (loc == null) {
+                renderer.entityTexFailed.add(type);
                 if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("Texture bootstrap failed for {}", type);
                 continue;
             }
@@ -44,8 +45,12 @@ public final class EntityTextureBootstrap {
                 if (Rentities.IS_DEBUG) {
                     Rentities.LOGGER.info("Bootstrapped texture for {}: {} -> GL {}", type, loc, glId);
                 }
-            } else if (Rentities.IS_DEBUG) {
-                Rentities.LOGGER.warn("Texture resolved for {} but has no valid GL texture: {}", type, loc);
+            } else {
+                renderer.entityTexFailed.add(type);
+                if (Rentities.IS_DEBUG) {
+                    Rentities.LOGGER.warn(
+                            "Texture resolved for {} but has no valid GL texture: {}", type, loc);
+                }
             }
         }
     }
@@ -89,10 +94,7 @@ public final class EntityTextureBootstrap {
         for (Class<?> c = cls; c != null && c != Object.class; c = c.getSuperclass()) {
             for (Method m : c.getDeclaredMethods()) {
                 if (m.getParameterCount() != 1) continue;
-                if (!(m.getName().equals(name)
-                        || m.getName().equals("method_3885")
-                        || m.getName().equals("getTexture")
-                        || m.getName().equals("getTextureLocation"))) continue;
+                if (!m.getName().equals(name)) continue;
                 if (!m.getParameterTypes()[0].isInstance(state)) continue;
                 return m;
             }

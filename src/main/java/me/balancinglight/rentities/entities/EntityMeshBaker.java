@@ -1,6 +1,5 @@
 package me.balancinglight.rentities.entities;
 
-import java.nio.IntBuffer;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import me.balancinglight.rentities.Rentities;
@@ -1245,8 +1244,8 @@ public class EntityMeshBaker {
             for (EntityType<?> type : loadedMeshes.keySet()) meshStatus.put(type, MeshStatus.READY);
 
             ensurePivotCapacity(Math.max(0, (loadedPivots.length / (MAX_BONES * 4)) - 1));
-            bonePivotData = Arrays.copyOf(loadedPivots, Math.max(loadedPivots.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES * 4));
-            bonePivotWritten = Arrays.copyOf(loadedPivotWritten, Math.max(loadedPivotWritten.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES));
+            pivotDataSnapshot = Arrays.copyOf(loadedPivots, Math.max(loadedPivots.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES * 4));
+            pivotWrittenSnapshot = Arrays.copyOf(loadedPivotWritten, Math.max(loadedPivotWritten.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES));
             pivotVersion++;
 
             // Rebuild global VBO/EBO offsets from the actual LinkedHashMap upload order.

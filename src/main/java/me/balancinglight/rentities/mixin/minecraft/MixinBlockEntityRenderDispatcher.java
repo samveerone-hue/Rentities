@@ -38,4 +38,13 @@ public abstract class MixinBlockEntityRenderDispatcher {
     private void rentities$endBlockEntityRender(CallbackInfo ci) {
         EntityDirectExtractor.setSkipBatching(false);
     }
+    @Inject(
+            method = "method_3555",
+            at = @At("THROW"),
+            remap = false
+    )
+    private void rentities$abortBlockEntityRender(CallbackInfo ci) {
+        EntityDirectExtractor.setSkipBatching(false);
+    }
+
 }

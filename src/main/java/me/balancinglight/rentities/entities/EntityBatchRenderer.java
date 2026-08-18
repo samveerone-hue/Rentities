@@ -1,6 +1,5 @@
 package me.balancinglight.rentities.entities;
 
-import java.lang.invoke.MethodHandles;
 import me.balancinglight.rentities.render.RendererBackendManager;
 
 import me.balancinglight.rentities.Rentities;

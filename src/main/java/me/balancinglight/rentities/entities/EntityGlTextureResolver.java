@@ -39,7 +39,7 @@ public final class EntityGlTextureResolver {
     public static int resolveGlId(Object loc) {
         if (loc == null) return 0;
         // OpenGL texture queries are only valid while the client render context is current.
-        if (!RenderSystem.isOnRenderThread()) return 0;
+        if (!RenderSystem.isOnRenderThreadOrInit()) return 0;
 
         String key = String.valueOf(loc);
         Integer cached = GL_ID_CACHE.get(key);

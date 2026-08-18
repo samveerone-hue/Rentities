@@ -128,9 +128,11 @@ public abstract class MixinEntityRenderDispatcher {
                 }
             }
 
+            renderer.entityTexFailed.add(type);
             if (Rentities.IS_DEBUG) Rentities.LOGGER.warn(
                     "State-based texture resolution failed for {}", type);
         } catch (Throwable e) {
+            renderer.entityTexFailed.add(type);
             if (Rentities.IS_DEBUG) {
                 Rentities.LOGGER.warn(
                         "Texture lookup via render state failed for {}: {}", type, e.toString());

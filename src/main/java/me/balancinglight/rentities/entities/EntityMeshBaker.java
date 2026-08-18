@@ -769,6 +769,7 @@ public class EntityMeshBaker {
         ByteBuffer ibuf = MemoryUtil.memAlloc((int) eboSize);
         try {
             FloatBuffer vf = vbuf.asFloatBuffer();
+            IntBuffer indexView = ibuf.asIntBuffer();
             long vertexCursor = 0;
             long indexCursor = 0;
 
@@ -785,14 +786,13 @@ public class EntityMeshBaker {
                         }
                     }
                 }
-                ibuf.asIntBuffer().put(inds);
+                indexView.put(inds);
 
                 vertexCursor += (long) verts.length * 4L;
                 indexCursor += (long) inds.length * 4L;
                 if (i + 1 < allVertices.size()) {
                     vf = vbuf.asFloatBuffer();
                     vf.position((int)(vertexCursor / 4L));
-                    ibuf.asIntBuffer().position((int)(indexCursor / 4L));
                 }
             }
 
@@ -985,13 +985,20 @@ public class EntityMeshBaker {
     }
 
     private void saveCurrentMeshesToCacheAsync() {
-        getCacheFile(); // resolve on the render thread
+        final java.io.File target = getCacheFile(); // resolve on the render thread
         Map<EntityType<?>, CpuMesh> snapshot = snapshotCpuMeshes();
-        cacheExecutor.execute(() -> saveCpuMeshesToCache(snapshot));
+        final float[] pivotDataSnapshot = Arrays.copyOf(bonePivotData, bonePivotData.length);
+        final boolean[] pivotWrittenSnapshot = Arrays.copyOf(bonePivotWritten, bonePivotWritten.length);
+        cacheExecutor.execute(() -> saveCpuMeshesToCache(
+                target, snapshot, pivotDataSnapshot, pivotWrittenSnapshot));
     }
 
-    private void saveCpuMeshesToCache(Map<EntityType<?>, CpuMesh> meshes) {
-        saveToCacheInternal(meshes);
+    private void saveCpuMeshesToCache(
+            java.io.File target,
+            Map<EntityType<?>, CpuMesh> meshes,
+            float[] pivotDataSnapshot,
+            boolean[] pivotWrittenSnapshot) {
+        saveToCacheInternal(target, meshes, pivotDataSnapshot, pivotWrittenSnapshot);
     }
 
     public int getVaoId() { return gpuMesh.vao(); }
@@ -1026,9 +1033,9 @@ public class EntityMeshBaker {
     private static final int CACHE_VERSION = 7;
 
     /** Cache file location: .minecraft/rentities_entity_mesh_cache.bin */
-    private static java.io.File cacheFile = null;
+    private static volatile java.io.File cacheFile = null;
 
-    private static java.io.File getCacheFile() {
+    private static synchronized java.io.File getCacheFile() {
         if (cacheFile == null) {
             cacheFile = new java.io.File(
                 net.minecraft.client.Minecraft.getInstance().gameDirectory,
@@ -1042,12 +1049,15 @@ public class EntityMeshBaker {
      * Call after bake() succeeds.
      */
     public void saveToCache() {
-        getCacheFile(); // resolve while Minecraft is on the render thread
-        cacheExecutor.execute(() -> saveToCacheInternal(snapshotCpuMeshes()));
+        final java.io.File target = getCacheFile(); // resolve while Minecraft is on the render thread
+        Map<EntityType<?>, CpuMesh> snapshot = snapshotCpuMeshes();
+        final float[] pivotDataSnapshot = Arrays.copyOf(bonePivotData, bonePivotData.length);
+        final boolean[] pivotWrittenSnapshot = Arrays.copyOf(bonePivotWritten, bonePivotWritten.length);
+        cacheExecutor.execute(() -> saveToCacheInternal(target, snapshot, pivotDataSnapshot, pivotWrittenSnapshot));
     }
 
-    private void saveToCacheInternal(Map<EntityType<?>, CpuMesh> meshes) {
-        java.io.File f = getCacheFile();
+    private void saveToCacheInternal(java.io.File targetFile, Map<EntityType<?>, CpuMesh> meshes, float[] pivotDataSnapshot, boolean[] pivotWrittenSnapshot) {
+        java.io.File f = targetFile;
         java.nio.file.Path target = f.toPath();
         java.nio.file.Path temp = target.resolveSibling(target.getFileName() + ".tmp");
         try (java.io.DataOutputStream out = new java.io.DataOutputStream(
@@ -1091,10 +1101,10 @@ public class EntityMeshBaker {
                 indexOffset += rebased.length;
             }
 
-            out.writeInt(bonePivotData.length);
-            for (float p : bonePivotData) out.writeFloat(p);
-            out.writeInt(bonePivotWritten.length);
-            for (boolean written : bonePivotWritten) out.writeBoolean(written);
+            out.writeInt(pivotDataSnapshot.length);
+            for (float p : pivotDataSnapshot) out.writeFloat(p);
+            out.writeInt(pivotWrittenSnapshot.length);
+            for (boolean written : pivotWrittenSnapshot) out.writeBoolean(written);
 
             out.flush();
         } catch (Exception e) {
@@ -1234,8 +1244,8 @@ public class EntityMeshBaker {
             for (EntityType<?> type : loadedMeshes.keySet()) meshStatus.put(type, MeshStatus.READY);
 
             ensurePivotCapacity(Math.max(0, (loadedPivots.length / (MAX_BONES * 4)) - 1));
-            bonePivotData = Arrays.copyOf(loadedPivots, Math.max(loadedPivots.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES * 4));
-            bonePivotWritten = Arrays.copyOf(loadedPivotWritten, Math.max(loadedPivotWritten.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES));
+            pivotDataSnapshot = Arrays.copyOf(loadedPivots, Math.max(loadedPivots.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES * 4));
+            pivotWrittenSnapshot = Arrays.copyOf(loadedPivotWritten, Math.max(loadedPivotWritten.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES));
             pivotVersion++;
 
             // Rebuild global VBO/EBO offsets from the actual LinkedHashMap upload order.

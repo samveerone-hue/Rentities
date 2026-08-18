@@ -59,7 +59,7 @@ public final class EntityTextureBootstrap {
             // Minecraft 1.21.11: create + update the renderer's actual render-state object,
             // then call the state-based getTexture method (method_3885 for LivingEntityRenderer).
             Object state = renderer.createRenderState();
-            Method update = findOneArgOrTwoArg(renderer.getClass(), "updateRenderState", "method_62354", state.getClass(), stub.getClass());
+            Method update = findOneArgOrTwoArg(renderer.getClass(), "updateRenderState", "method_62354", state.getClass(), stub);
             if (update != null) {
                 update.setAccessible(true);
                 if (update.getParameterCount() == 3) {
@@ -113,14 +113,14 @@ public final class EntityTextureBootstrap {
     }
 
     private static Method findOneArgOrTwoArg(Class<?> cls, String named, String intermediary,
-                                              Class<?> stateClass, Class<?> entityClass) {
+                                              Class<?> stateClass, Object entity) {
         for (Class<?> c = cls; c != null && c != Object.class; c = c.getSuperclass()) {
             for (Method m : c.getDeclaredMethods()) {
                 if (!m.getName().equals(named) && !m.getName().equals(intermediary)) continue;
                 Class<?>[] p = m.getParameterTypes();
-                if (p.length == 3 && p[0].isAssignableFrom(entityClass)
+                if (p.length == 3 && p[0].isInstance(entity)
                         && p[1].isAssignableFrom(stateClass) && p[2] == float.class) return m;
-                if (p.length == 2 && p[0].isAssignableFrom(entityClass)
+                if (p.length == 2 && p[0].isInstance(entity)
                         && p[1].isAssignableFrom(stateClass)) return m;
             }
         }

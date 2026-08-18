@@ -1,5 +1,7 @@
 package me.balancinglight.rentities.entities;
 
+import com.mojang.blaze3d.systems.RenderSystem;
+
 import me.balancinglight.rentities.Rentities;
 import net.minecraft.client.Minecraft;
 
@@ -36,6 +38,8 @@ public final class EntityGlTextureResolver {
 
     public static int resolveGlId(Object loc) {
         if (loc == null) return 0;
+        // OpenGL texture queries are only valid while the client render context is current.
+        if (!RenderSystem.isOnRenderThreadOrInit()) return 0;
 
         String key = String.valueOf(loc);
         Integer cached = GL_ID_CACHE.get(key);
@@ -113,7 +117,7 @@ public final class EntityGlTextureResolver {
             if (m.getReturnType().getName().equals("com.mojang.blaze3d.textures.GpuTexture")
                     || m.getName().equals("method_68004")
                     || m.getName().equals("getGlTexture")) {
-                MethodHandle mh = MethodHandles.lookup().unreflect(m);
+                MethodHandle mh = MethodHandles.privateLookupIn(m.getDeclaringClass(), MethodHandles.lookup()).unreflect(m);
                 glTextureGetter = mh.asType(
                         mh.type().changeReturnType(Object.class));
                 return glTextureGetter.invoke(texObj);
@@ -153,7 +157,7 @@ public final class EntityGlTextureResolver {
                 f.setAccessible(true);
                 int id = f.getInt(gpuTex);
                 if (id > 0) {
-                    glTextureIdGetter = MethodHandles.lookup().unreflectGetter(f);
+                    glTextureIdGetter = MethodHandles.privateLookupIn(f.getDeclaringClass(), MethodHandles.lookup()).unreflectGetter(f);
                     return id;
                 }
             }
@@ -169,7 +173,7 @@ public final class EntityGlTextureResolver {
                 f.setAccessible(true);
                 int id = f.getInt(gpuTex);
                 if (id > 0 && org.lwjgl.opengl.GL11.glIsTexture(id)) {
-                    glTextureIdGetter = MethodHandles.lookup().unreflectGetter(f);
+                    glTextureIdGetter = MethodHandles.privateLookupIn(f.getDeclaringClass(), MethodHandles.lookup()).unreflectGetter(f);
                     return id;
                 }
             }

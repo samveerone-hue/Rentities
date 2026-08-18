@@ -748,7 +748,7 @@ public class EntityBatchRenderer {
             Field f = findField(cls, float.class, "float", names);
             if (f == null) return null;
             try {
-                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
+                return java.lang.invoke.MethodHandles.privateLookupIn(f.getDeclaringClass(), MethodHandles.lookup()).unreflectGetter(f)
                     .asType(java.lang.invoke.MethodType.methodType(float.class, Object.class));
             } catch (Exception e) { return null; }
         }
@@ -758,7 +758,7 @@ public class EntityBatchRenderer {
             Field f = findField(cls, boolean.class, "boolean", names);
             if (f == null) return null;
             try {
-                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
+                return java.lang.invoke.MethodHandles.privateLookupIn(f.getDeclaringClass(), MethodHandles.lookup()).unreflectGetter(f)
                     .asType(java.lang.invoke.MethodType.methodType(boolean.class, Object.class));
             } catch (Exception e) { return null; }
         }
@@ -768,7 +768,7 @@ public class EntityBatchRenderer {
             Field f = findField(cls, null, "object", names);
             if (f == null) return null;
             try {
-                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
+                return java.lang.invoke.MethodHandles.privateLookupIn(f.getDeclaringClass(), MethodHandles.lookup()).unreflectGetter(f)
                     .asType(java.lang.invoke.MethodType.methodType(Object.class, Object.class));
             } catch (Exception e) { return null; }
         }
@@ -790,7 +790,7 @@ public class EntityBatchRenderer {
                 return null;
             }
             try {
-                return java.lang.invoke.MethodHandles.lookup().unreflectGetter(f)
+                return java.lang.invoke.MethodHandles.privateLookupIn(f.getDeclaringClass(), MethodHandles.lookup()).unreflectGetter(f)
                     .asType(java.lang.invoke.MethodType.methodType(Object.class, Object.class));
             } catch (Exception e) {
                 Rentities.LOGGER.error(

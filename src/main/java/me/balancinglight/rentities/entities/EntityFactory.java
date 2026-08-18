@@ -6,12 +6,12 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 
 import java.lang.reflect.Method;
-import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
 
 public class EntityFactory {
 
-    private static final Map<EntityType<?>, Entity> DUMMY_CACHE = new HashMap<>();
+    private static final Map<EntityType<?>, Entity> DUMMY_CACHE = new ConcurrentHashMap<>();
 
     public static Entity getOrCreateDummy(EntityType<?> type) {
         if (type == null) return null;

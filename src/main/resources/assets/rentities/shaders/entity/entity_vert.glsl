@@ -104,6 +104,7 @@ uniform int uAnimationLodEnabled;
 uniform float uAnimationLodMediumDistance;
 uniform float uAnimationLodFarDistance;
 uniform float uAnimationLodMediumScale;
+uniform vec3 uCameraPos;
 
 float gWalkSin;
 float gWalkCos;
@@ -113,7 +114,8 @@ float gAnimationAmountScale = 1.0;
 
 int getAnimationLod(vec3 p) {
     if (uAnimationLodEnabled == 0) return 0;
-    float d2 = dot(p, p);
+    vec3 cameraRelative = p - uCameraPos;
+    float d2 = dot(cameraRelative, cameraRelative);
     float m2 = max(uAnimationLodMediumDistance, 0.0);
     float f2 = max(uAnimationLodFarDistance, m2);
     if (d2 >= f2 * f2) return 2;
@@ -254,12 +256,13 @@ mat4 pivotRot(vec3 p, mat4 r) {
  *
  * ModelPart's transform order is Z -> Y -> X, so:
  *
- *     R = Rz(roll) * Ry(yaw) * Rx(pitch)
- *
- * We apply that around the exact bone pivot captured in the baked mesh.
+ * Matrix multiplication uses column vectors, so the right-most transform is
+ * applied first. To reproduce the vanilla Z -> Y -> X effect, compose as
+ *     R = Rx(pitch) * Ry(yaw) * Rz(roll)
+ * and apply that around the exact bone pivot captured in the baked mesh.
  */
 mat4 armorStandRotation(vec4 pose) {
-    return rotZ(pose.z) * rotY(pose.y) * rotX(pose.x);
+    return rotX(pose.x) * rotY(pose.y) * rotZ(pose.z);
 }
 
 mat4 getArmorStandBone(int b, EntityInstance inst) {
@@ -317,7 +320,7 @@ mat4 getBipedBone(int b, EntityInstance inst) {
         : 0.0;
 
     float w2 = sa > 0.01
-        ? cos(sw * 0.6662 + PI) * 1.4 * sa
+        ? (-gWalkCos) * 1.4 * sa
         : 0.0;
 
     vec3 p = getP(inst, b);
@@ -1065,5 +1068,5 @@ void main() {
             : 0.0;
 
     vGlintAnim =
-        fract(uGameTime * 0.001);
+        fract(uGameTime * 0.001) * (2.0 * PI);
 }

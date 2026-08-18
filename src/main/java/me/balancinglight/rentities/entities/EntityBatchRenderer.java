@@ -17,6 +17,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryUtil;
+import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
 import java.util.Map;
 import java.util.Set;
@@ -30,6 +31,7 @@ import static org.lwjgl.opengl.GL13C.glActiveTexture;
 import static org.lwjgl.opengl.GL20C.glGetUniformLocation;
 import static org.lwjgl.opengl.GL20C.glUniform1f;
 import static org.lwjgl.opengl.GL20C.glUniform1i;
+import static org.lwjgl.opengl.GL20C.glUniform3f;
 import static org.lwjgl.opengl.GL20C.glUniformMatrix4fv;
 import static org.lwjgl.opengl.GL20C.glUseProgram;
 import static org.lwjgl.opengl.GL30C.glBindVertexArray;
@@ -109,6 +111,7 @@ public class EntityBatchRenderer {
     private int lastBoundGlTexId = 0;
     private int uBaseInstance  = -1;
     private int uIndirect      = -1;
+    private int uCameraPos    = -1;
 
     private final EntityMeshBaker meshBaker;
     private final EntityErrorRenderer errorRenderer;
@@ -388,6 +391,10 @@ public class EntityBatchRenderer {
                     ? (float)(mc.level.getGameTime() % 100000L) + partialTick
                     : partialTick;
             glUniform1f(uGameTime, gameTime);
+            if (uCameraPos >= 0) {
+                var cam = mc.gameRenderer.getMainCamera().getPosition();
+                glUniform3f(uCameraPos, (float) cam.x, (float) cam.y, (float) cam.z);
+            }
 
             // Bind SSBOs
         glBindBufferRange(
@@ -1047,6 +1054,7 @@ public class EntityBatchRenderer {
             uEntityTextures = entityShader.getUniformLocation("uEntityTexture");
             uBaseInstance   = entityShader.getUniformLocation("uBaseInstance");
             uIndirect       = entityShader.getUniformLocation("uIndirect");
+            uCameraPos     = entityShader.getUniformLocation("uCameraPos");
             glUseProgram(0);
         } catch (Exception e) {
             Rentities.LOGGER.error("Entity shader compilation failed", e);

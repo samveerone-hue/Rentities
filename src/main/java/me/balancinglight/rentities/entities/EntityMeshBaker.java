@@ -15,6 +15,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
 import java.util.*;
 import java.util.concurrent.*;
 import java.nio.file.*;
@@ -1244,8 +1245,8 @@ public class EntityMeshBaker {
             for (EntityType<?> type : loadedMeshes.keySet()) meshStatus.put(type, MeshStatus.READY);
 
             ensurePivotCapacity(Math.max(0, (loadedPivots.length / (MAX_BONES * 4)) - 1));
-            pivotDataSnapshot = Arrays.copyOf(loadedPivots, Math.max(loadedPivots.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES * 4));
-            pivotWrittenSnapshot = Arrays.copyOf(loadedPivotWritten, Math.max(loadedPivotWritten.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES));
+            bonePivotData = Arrays.copyOf(loadedPivots, Math.max(loadedPivots.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES * 4));
+            bonePivotWritten = Arrays.copyOf(loadedPivotWritten, Math.max(loadedPivotWritten.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES));
             pivotVersion++;
 
             // Rebuild global VBO/EBO offsets from the actual LinkedHashMap upload order.

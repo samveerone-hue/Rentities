@@ -6,19 +6,66 @@ layout(location = 0) in vec3 aPosition;
 struct EntityInstance {
     float posX, posY, posZ;
     float rotationY;
-    float limbSwing, limbSwingAmount, headYaw, headPitch;
-    float attackProgress, bowPullProgress, hurtTime, deathTime;
-    float sneakProgress, swimProgress;
+
+    float limbSwing;
+    float limbSwingAmount;
+    float headYaw;
+    float headPitch;
+    float attackProgress;
+    float bowPullProgress;
+    float hurtTime;
+    float deathTime;
+    float sneakProgress;
+    float swimProgress;
+
     int   flags;
-    float riptideProgress, sitProgress, eatProgress, swellAmount;
-    float explodeProgress, rollProgress;
-    int   entityTypeIndex, animationCategory, textureArrayLayer;
-    int   heldItemMain, heldItemOffhand;
-    int   armorHead, armorChest, armorLegs, armorFeet;
+    float riptideProgress;
+    float sitProgress;
+    float eatProgress;
+    float swellAmount;
+    float explodeProgress;
+    float rollProgress;
+
+    int   entityTypeIndex;
+    int   animationCategory;
+    int   textureArrayLayer;
+
+    int   heldItemMain;
+    int   heldItemOffhand;
+    int   armorHead;
+    int   armorChest;
+    int   armorLegs;
+    int   armorFeet;
+
     int   mountEntityID;
-    float seatOffsetX, seatOffsetY, seatOffsetZ;
-    float texScaleX, texScaleY;
-    float padding1, padding2, padding3, padding4;
+
+    float seatOffsetX;
+    float seatOffsetY;
+    float seatOffsetZ;
+
+    float texScaleX;
+    float texScaleY;
+
+    /*
+     * Existing head pivot slot.
+     */
+    float headPivotX;
+    float headPivotY;
+    float headPivotZ;
+    float padding4;
+
+    /*
+     * Armor-stand pose slots.
+     *
+     * xyz = pitch, yaw, roll in radians
+     * w   = padding
+     */
+    vec4 armorStandHeadPose;
+    vec4 armorStandBodyPose;
+    vec4 armorStandLeftArmPose;
+    vec4 armorStandRightArmPose;
+    vec4 armorStandLeftLegPose;
+    vec4 armorStandRightLegPose;
 };
 layout(std430, binding = 12) buffer EntityInstanceBuffer { EntityInstance instances[]; };
 
@@ -44,7 +91,7 @@ void main() {
     // Apply spin
     vec3 rotP = vec3(p.x*sc - p.z*ss, p.y + bob, p.x*ss + p.z*sc);
 
-    vec4 world = vec4(rotP * 0.0625, 1.0);
+    vec4 world = vec4(rotP, 1.0);
     world.x += inst.posX;
     world.y += inst.posY + 0.9; // lift to roughly entity chest height
     world.z += inst.posZ;

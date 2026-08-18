@@ -392,7 +392,7 @@ public class EntityBatchRenderer {
                     : partialTick;
             glUniform1f(uGameTime, gameTime);
             if (uCameraPos >= 0) {
-                var cam = mc.gameRenderer.getMainCamera().getCameraPos();
+                var cam = mc.gameRenderer.getMainCamera().position();
                 glUniform3f(uCameraPos, (float) cam.x, (float) cam.y, (float) cam.z);
             }
 

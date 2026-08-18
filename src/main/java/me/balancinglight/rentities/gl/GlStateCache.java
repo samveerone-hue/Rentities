@@ -17,6 +17,11 @@ public final class GlStateCache {
     private int vao = Integer.MIN_VALUE;
     private int texture2dUnit0 = Integer.MIN_VALUE;
 
+    /**
+     * Invalidates all cached bindings. Call at the start of every pass whose GL state
+     * is externally owned (Minecraft/Sodium/etc.) because GlStateGuard restores the
+     * real state independently of this cache.
+     */
     public void reset() {
         program = Integer.MIN_VALUE;
         vao = Integer.MIN_VALUE;

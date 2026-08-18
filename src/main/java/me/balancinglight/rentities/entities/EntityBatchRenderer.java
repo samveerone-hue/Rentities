@@ -341,6 +341,10 @@ public class EntityBatchRenderer {
         }
 
         stateGuard.capture();
+        // Minecraft/Sodium/other renderers may have changed any GL object since the
+        // previous Rentities pass. GlStateGuard restores the real GL state after the
+        // pass, so this cache must never survive across passes.
+        stateCache.reset();
         try {
             // Bind shader and upload uniforms
             glUseProgram(entityShader.id);

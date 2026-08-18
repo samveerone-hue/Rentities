@@ -15,6 +15,8 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.Coerce;
 
+import java.lang.reflect.Method;
+
 @Mixin(targets = "net/minecraft/class_898", remap = false)
 public abstract class MixinEntityRenderDispatcher {
 
@@ -88,103 +90,65 @@ public abstract class MixinEntityRenderDispatcher {
 
     private void tryResolveTexture(EntityBatchRenderer renderer, EntityType<?> type, Object state) {
         try {
-            Class<?> cls = state.getClass();
-            while (cls != null && cls != Object.class) {
-                for (java.lang.reflect.Field f : cls.getDeclaredFields()) {
-                    String typeName = f.getType().getSimpleName();
-                    if (typeName.equals("ResourceLocation") || typeName.equals("Identifier")) {
-                        f.setAccessible(true);
-                        Object loc = f.get(state);
-                        if (loc != null) {
-                            if (Rentities.IS_DEBUG)
-                                Rentities.LOGGER.info("Found texture loc via state field {} = {}", f.getName(), loc);
-                            renderer.entityTextureLocs.put(type, loc);
-                            return;
-                        }
-                    }
-                }
-                cls = cls.getSuperclass();
-            }
-        } catch (Exception e) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("Texture lookup via render state failed for {}: {}", type, e.getMessage());
-        }
-
-        try {
-            String targetKey = "entity.minecraft." + type.toShortString(); // "entity.minecraft.zombie"
-            if (Rentities.IS_DEBUG)
-                Rentities.LOGGER.info("Looking for renderer, targetKey={}", targetKey);
-
             Object entityRenderer = null;
-            try {
-                java.lang.reflect.Field rf = null;
-                Class<?> dispatcherClass = net.minecraft.client.renderer.entity.EntityRenderDispatcher.class;
-                try { rf = dispatcherClass.getDeclaredField("field_4696"); }
-                catch (NoSuchFieldException ignored) {
-                    try { rf = dispatcherClass.getDeclaredField("renderers"); }
-                    catch (NoSuchFieldException ignored2) {}
-                }
-                if (rf != null) {
-                    rf.setAccessible(true);
-                    java.util.Map<?,?> map = (java.util.Map<?,?>) rf.get(this);
-                    if (Rentities.IS_DEBUG)
-                        Rentities.LOGGER.info("field_4696 map size={}", map.size());
-                    // 1.21.11 keys this map by EntityType, not a string identifier.
-                    entityRenderer = map.get(type);
-                    if (entityRenderer == null) {
-                        // Compatibility fallback for unusual map implementations.
-                        for (java.util.Map.Entry<?,?> entry : map.entrySet()) {
-                            if (entry.getKey() == type || (entry.getKey() != null && type.equals(entry.getKey()))) {
-                                entityRenderer = entry.getValue();
-                                break;
-                            }
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("field_4696 access failed: {}", e.getMessage());
+            Class<?> dispatcherClass = net.minecraft.client.renderer.entity.EntityRenderDispatcher.class;
+            java.lang.reflect.Field rf = null;
+            try { rf = dispatcherClass.getDeclaredField("field_4696"); }
+            catch (NoSuchFieldException ignored) {
+                try { rf = dispatcherClass.getDeclaredField("renderers"); }
+                catch (NoSuchFieldException ignored2) {}
+            }
+            if (rf != null) {
+                rf.setAccessible(true);
+                java.util.Map<?, ?> map = (java.util.Map<?, ?>) rf.get(this);
+                entityRenderer = map.get(type);
             }
 
             if (entityRenderer == null) {
-                if (Rentities.IS_DEBUG)
-                    Rentities.LOGGER.warn("Could not find renderer for {} in renderers map", targetKey);
-            } else {
-                Class<?> rc = entityRenderer.getClass();
-                while (rc != null && rc != Object.class) {
-                    for (java.lang.reflect.Method m : rc.getDeclaredMethods()) {
-                        if (m.getParameterCount() == 1 &&
-                            (m.getName().equals("method_3885") ||
-                             m.getName().equals("getTexture") ||
-                             m.getName().equals("getTextureLocation") ||
-                             m.getName().equals("method_4216"))) {
-                            m.setAccessible(true);
-                            try {
-                                Object loc = m.invoke(entityRenderer, state);
-                                if (Rentities.IS_DEBUG)
-                                    Rentities.LOGGER.info("method_3885({}) = {}", targetKey, loc);
-                                if (loc != null) {
-                                    // the new GpuTexture pipeline in 1.21.11
-                                    renderer.entityTextureLocs.put(type, loc);
-                                    int glId = EntityGlTextureResolver.resolveGlId(loc);
-                                    if (glId > 0) renderer.entityGlTexIds.put(type, glId);
-                                    if (Rentities.IS_DEBUG)
-                                        Rentities.LOGGER.info("Cached texture loc for {}: {}", type, loc);
-                                    return;
-                                }
-                            } catch (Exception e) {
-                                if (Rentities.IS_DEBUG)
-                                    Rentities.LOGGER.warn("method_3885 invoke failed: {}", e.getMessage());
-                            }
-                        }
+                if (Rentities.IS_DEBUG) Rentities.LOGGER.warn(
+                        "Could not find renderer for {} in EntityRenderDispatcher map", type);
+                return;
+            }
+
+            // 1.21.11: living-entity textures are resolved from the render state.
+            // Never select an arbitrary Identifier field: render states may contain
+            // unrelated resource identifiers.
+            Method textureMethod = findTextureGetter(entityRenderer.getClass(), state.getClass());
+            if (textureMethod != null) {
+                textureMethod.setAccessible(true);
+                Object loc = textureMethod.invoke(entityRenderer, state);
+                if (loc != null) {
+                    int glId = EntityGlTextureResolver.resolveGlId(loc);
+                    if (glId > 0) {
+                        renderer.entityTextureLocs.put(type, loc);
+                        renderer.entityGlTexIds.put(type, glId);
+                        renderer.entityTexFailed.remove(type);
+                        return;
                     }
-                    rc = rc.getSuperclass();
                 }
             }
-        } catch (Exception e) {
-            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn("Texture lookup via renderer map failed for {}: {}", type, e.getMessage());
-        }
 
-        if (Rentities.IS_DEBUG)
-            Rentities.LOGGER.warn("Could not resolve texture for {}", type);
-        renderer.entityTexFailed.add(type);
+            if (Rentities.IS_DEBUG) Rentities.LOGGER.warn(
+                    "State-based texture resolution failed for {}", type);
+        } catch (Throwable e) {
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.warn(
+                        "Texture lookup via render state failed for {}: {}", type, e.toString());
+            }
+        }
+    }
+
+    private static java.lang.reflect.Method findTextureGetter(Class<?> cls, Class<?> stateClass) {
+        String[] names = {"method_3885", "getTexture", "getTextureLocation", "method_4216"};
+        for (String name : names) {
+            for (Class<?> c = cls; c != null && c != Object.class; c = c.getSuperclass()) {
+                for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
+                    if (!m.getName().equals(name) || m.getParameterCount() != 1) continue;
+                    if (!m.getParameterTypes()[0].isAssignableFrom(stateClass)) continue;
+                    return m;
+                }
+            }
+        }
+        return null;
     }
 }

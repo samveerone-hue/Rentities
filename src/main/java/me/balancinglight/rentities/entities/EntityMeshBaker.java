@@ -38,6 +38,8 @@ public class EntityMeshBaker {
     private boolean[] bonePivotWritten =
             new boolean[INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES];
     private int pivotSSBOId = 0;
+    private long pivotVersion = 1L;
+    private long uploadedPivotVersion = Long.MIN_VALUE;
     private int currentBakingTypeIdx = -1;
 
     private final EntityMeshGpuHandle gpuMesh = new EntityMeshGpuHandle();
@@ -847,6 +849,7 @@ public class EntityMeshBaker {
         Arrays.fill(bonePivotWritten, start, start + MAX_BONES, false);
         Arrays.fill(bonePivotData, typeIndex * MAX_BONES * 4,
                 (typeIndex + 1) * MAX_BONES * 4, 0.0f);
+        pivotVersion++;
     }
 
     /**
@@ -1003,11 +1006,16 @@ public class EntityMeshBaker {
      * Returns the GL buffer id.
      */
     public int uploadPivotSSBO() {
+        if (pivotSSBOId != 0 && uploadedPivotVersion == pivotVersion) return pivotSSBOId;
         if (pivotSSBOId == 0) pivotSSBOId = glCreateBuffers();
         ByteBuffer buf = MemoryUtil.memAlloc(bonePivotData.length * 4);
-        buf.asFloatBuffer().put(bonePivotData).flip();
-        glNamedBufferData(pivotSSBOId, buf, GL_STATIC_DRAW);
-        MemoryUtil.memFree(buf);
+        try {
+            buf.asFloatBuffer().put(bonePivotData).flip();
+            glNamedBufferData(pivotSSBOId, buf, GL_STATIC_DRAW);
+            uploadedPivotVersion = pivotVersion;
+        } finally {
+            MemoryUtil.memFree(buf);
+        }
         if (Rentities.IS_DEBUG) Rentities.LOGGER.info("Uploaded bone pivot SSBO: {} entries", bonePivotData.length / 4);
         return pivotSSBOId;
     }
@@ -1015,7 +1023,7 @@ public class EntityMeshBaker {
     public int getPivotSSBOId() { return pivotSSBOId; }
 
     private static final int CACHE_MAGIC   = 0xECAC1021;
-    private static final int CACHE_VERSION = 6;
+    private static final int CACHE_VERSION = 7;
 
     /** Cache file location: .minecraft/rentities_entity_mesh_cache.bin */
     private static java.io.File cacheFile = null;
@@ -1085,6 +1093,8 @@ public class EntityMeshBaker {
 
             out.writeInt(bonePivotData.length);
             for (float p : bonePivotData) out.writeFloat(p);
+            out.writeInt(bonePivotWritten.length);
+            for (boolean written : bonePivotWritten) out.writeBoolean(written);
 
             out.flush();
         } catch (Exception e) {
@@ -1118,97 +1128,129 @@ public class EntityMeshBaker {
         java.io.File f = getCacheFile();
         if (!f.exists()) return false;
 
-        cpuMeshes.clear();
-        meshInfoMap.clear();
-        meshStatus.clear();
+        final long MAX_CACHE_BYTES = 512L * 1024L * 1024L;
+        final int MAX_ENTITY_TYPES = 4096;
+        final int MAX_ID_BYTES = 512;
+        final int MAX_VERTEX_FLOATS_PER_MESH = 9 * 2_000_000;
+        final int MAX_INDICES_PER_MESH = 6_000_000;
+
+        try {
+            long size = java.nio.file.Files.size(f.toPath());
+            if (size <= 0 || size > MAX_CACHE_BYTES) {
+                Rentities.LOGGER.warn("[EntityCache] Invalid cache size {}; ignoring cache", size);
+                return false;
+            }
+        } catch (Exception e) {
+            Rentities.LOGGER.warn("[EntityCache] Could not inspect cache size: {}", e.getMessage());
+            return false;
+        }
+
+        Map<EntityType<?>, CpuMesh> loadedMeshes = new LinkedHashMap<>();
+        float[] loadedPivots = null;
+        boolean[] loadedPivotWritten = null;
 
         try (java.io.DataInputStream in = new java.io.DataInputStream(
                 new java.io.BufferedInputStream(new java.io.FileInputStream(f)))) {
 
-            if (in.readInt() != CACHE_MAGIC)   { Rentities.LOGGER.warn("[EntityCache] Bad magic"); return false; }
-            if (in.readInt() != CACHE_VERSION)  { Rentities.LOGGER.warn("[EntityCache] Version mismatch"); return false; }
+            if (in.readInt() != CACHE_MAGIC) { Rentities.LOGGER.warn("[EntityCache] Bad magic"); return false; }
+            if (in.readInt() != CACHE_VERSION) { Rentities.LOGGER.warn("[EntityCache] Version mismatch; rebuilding cache"); return false; }
 
             int typeCount = in.readInt();
-            List<float[]> allVertices = new ArrayList<>(typeCount);
-            List<int[]>   allIndices  = new ArrayList<>(typeCount);
+            if (typeCount < 0 || typeCount > MAX_ENTITY_TYPES) {
+                Rentities.LOGGER.warn("[EntityCache] Invalid entity type count {}", typeCount);
+                return false;
+            }
 
             Map<String, EntityType<?>> typesById = new HashMap<>();
             for (EntityType<?> candidate : EntityBatchRegistry.REGISTRY_TYPES()) {
                 Object key = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(candidate);
                 if (key != null) typesById.put(key.toString(), candidate);
             }
-            int totalVertexCount = 0, totalIndexCount = 0;
 
             for (int i = 0; i < typeCount; i++) {
-                // Type ID
                 int idLen = in.readInt();
+                if (idLen < 0 || idLen > MAX_ID_BYTES) throw new java.io.IOException("invalid id length " + idLen);
                 byte[] idBytes = new byte[idLen];
                 in.readFully(idBytes);
                 String id = new String(idBytes, java.nio.charset.StandardCharsets.UTF_8);
-                // Find entity type by matching the saved ID string against all known types.
-                // Avoids ResourceLocation/reflection issues — same iteration used in bake().
-                EntityType<?> type = typesById.get(id);
-                if (type == null) {
-                    Rentities.LOGGER.warn("[EntityCache] Unknown entity type: {}, skipping", id);
-                    // Still need to read past the data
-                    int vLen = in.readInt(); for (int j=0;j<vLen;j++) in.readFloat();
-                    int iLen = in.readInt(); for (int j=0;j<iLen;j++) in.readInt();
-                    in.readInt(); in.readInt(); in.readInt(); // meshInfo
-                    continue;
-                }
 
-                // Vertices
                 int vLen = in.readInt();
+                if (vLen < 0 || vLen > MAX_VERTEX_FLOATS_PER_MESH || vLen % 9 != 0) {
+                    throw new java.io.IOException("invalid vertex length " + vLen + " for " + id);
+                }
                 float[] verts = new float[vLen];
                 for (int j = 0; j < vLen; j++) verts[j] = in.readFloat();
 
-                // Indices
                 int iLen = in.readInt();
+                if (iLen < 0 || iLen > MAX_INDICES_PER_MESH) {
+                    throw new java.io.IOException("invalid index length " + iLen + " for " + id);
+                }
                 int[] inds = new int[iLen];
                 for (int j = 0; j < iLen; j++) inds[j] = in.readInt();
-                cpuMeshes.put(type, new CpuMesh(verts, inds));
-                meshStatus.put(type, MeshStatus.READY);
 
-                // Mesh info in the cache contains global byte offsets. The authoritative
-                // CPU mesh map stores local indices so rebuilding can safely rebase once.
-                int vOffset = in.readInt();
-                int iOffset = in.readInt();
-                int iCount  = in.readInt();
-                int baseVertex = vOffset / VERTEX_STRIDE;
-                for (int j = 0; j < inds.length; j++) {
-                    inds[j] -= baseVertex;
+                // Saved indices are rebased to the old combined vertex buffer. Convert
+                // them back to local mesh indices before putting them in cpuMeshes.
+                int savedVertexByteOffset = in.readInt();
+                int savedIndexByteOffset = in.readInt();
+                int savedIndexCount = in.readInt();
+                if (savedVertexByteOffset < 0 || savedIndexByteOffset < 0 || savedIndexCount < 0
+                        || savedIndexCount != iLen || savedVertexByteOffset % VERTEX_STRIDE != 0
+                        || savedIndexByteOffset % 4 != 0) {
+                    throw new java.io.IOException("invalid mesh metadata for " + id);
                 }
 
-                meshInfoMap.put(type, new MeshInfo(vOffset, iOffset, iCount));
-
-                allVertices.add(verts);
-                int[] rebasedForUpload = Arrays.copyOf(inds, inds.length);
-                for (int j = 0; j < rebasedForUpload.length; j++) {
-                    rebasedForUpload[j] += totalVertexCount;
+                EntityType<?> type = typesById.get(id);
+                if (type != null) {
+                    int baseVertex = savedVertexByteOffset / VERTEX_STRIDE;
+                    for (int j = 0; j < inds.length; j++) {
+                        inds[j] -= baseVertex;
+                        if (inds[j] < 0 || inds[j] >= vLen / 9) {
+                            throw new java.io.IOException("index outside local mesh for " + id);
+                        }
+                    }
+                    loadedMeshes.put(type, new CpuMesh(verts, inds));
                 }
-                allIndices.add(rebasedForUpload);
-                totalVertexCount += verts.length / 9;
-                totalIndexCount  += iLen;
             }
 
-            // Pivot table
             int pivotLen = in.readInt();
-            if (pivotLen > bonePivotData.length) {
-                int requiredTypes = (pivotLen + MAX_BONES * 4 - 1) / (MAX_BONES * 4);
-                ensurePivotCapacity(requiredTypes - 1);
+            if (pivotLen < 0 || pivotLen > 1_000_000 || pivotLen % 4 != 0) {
+                throw new java.io.IOException("invalid pivot float length " + pivotLen);
             }
-            for (int i = 0; i < pivotLen; i++)
-                bonePivotData[i] = in.readFloat();
-            Arrays.fill(bonePivotWritten, true);
+            loadedPivots = new float[pivotLen];
+            for (int i = 0; i < pivotLen; i++) loadedPivots[i] = in.readFloat();
 
-            uploadToGPU(allVertices, allIndices, totalVertexCount, totalIndexCount);
+            int writtenLen = in.readInt();
+            if (writtenLen < 0 || writtenLen > 250_000 || writtenLen != pivotLen / 4) {
+                throw new java.io.IOException("invalid pivot-written length " + writtenLen);
+            }
+            loadedPivotWritten = new boolean[writtenLen];
+            for (int i = 0; i < writtenLen; i++) loadedPivotWritten[i] = in.readBoolean();
+
+            // Commit only after the entire file has validated.
+            cpuMeshes.clear();
+            meshInfoMap.clear();
+            meshStatus.clear();
+            cpuMeshes.putAll(loadedMeshes);
+            for (EntityType<?> type : loadedMeshes.keySet()) meshStatus.put(type, MeshStatus.READY);
+
+            ensurePivotCapacity(Math.max(0, (loadedPivots.length / (MAX_BONES * 4)) - 1));
+            bonePivotData = Arrays.copyOf(loadedPivots, Math.max(loadedPivots.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES * 4));
+            bonePivotWritten = Arrays.copyOf(loadedPivotWritten, Math.max(loadedPivotWritten.length, INITIAL_ENTITY_TYPE_CAPACITY * MAX_BONES));
+            pivotVersion++;
+
+            // Rebuild global VBO/EBO offsets from the actual LinkedHashMap upload order.
+            // Never trust historical byte offsets for live MeshInfo.
+            rebuildGpuBuffersFromCpuMeshes();
+            uploadPivotSSBO();
             bakeState = BakeState.READY;
             Rentities.LOGGER.info("[EntityCache] Loaded {} entity types from cache", meshInfoMap.size());
             return true;
 
         } catch (Exception e) {
-            Rentities.LOGGER.error("[EntityCache] Failed to load cache: {}", e.getMessage());
+            Rentities.LOGGER.error("[EntityCache] Failed to load cache; ignoring stale/corrupt cache: {}", e.getMessage());
+            cpuMeshes.clear();
             meshInfoMap.clear();
+            meshStatus.clear();
             bakeState = BakeState.FAILED;
             return false;
         }
@@ -1219,6 +1261,11 @@ public class EntityMeshBaker {
 
     public void delete() {
         cacheExecutor.shutdown();
+        if (pivotSSBOId != 0) {
+            glDeleteBuffers(pivotSSBOId);
+            pivotSSBOId = 0;
+        }
+        uploadedPivotVersion = Long.MIN_VALUE;
         gpuMesh.delete();
     }
 }

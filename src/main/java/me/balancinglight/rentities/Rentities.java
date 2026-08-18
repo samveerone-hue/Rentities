@@ -1,10 +1,14 @@
 package me.balancinglight.rentities;
 
+import me.balancinglight.rentities.render.RendererBackendManager;
+
 import net.fabricmc.api.ClientModInitializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class Rentities implements ClientModInitializer {
+    private static final RendererBackendManager BACKEND_MANAGER = new RendererBackendManager();
+
 
     public static final Logger LOGGER = LoggerFactory.getLogger("rentities");
     public static final boolean IS_DEBUG = System.getProperty("rentities.debug") != null;
@@ -27,21 +31,16 @@ public class Rentities implements ClientModInitializer {
             IS_COMPATIBLE = CAPABILITIES.isProbed();
             LOGGER.info("[Rentities] renderer capability state: {}", CAPABILITIES.describe());
         }
-        IS_ENABLED = IS_COMPATIBLE && config.entity_batching_enabled &&
-                CAPABILITIES.choosePath(config) != RendererCapabilityState.RenderPath.VANILLA;
+        IS_ENABLED = IS_COMPATIBLE && BACKEND_MANAGER.select() != RendererBackendManager.Backend.VANILLA;
     }
 
     public static boolean shouldInterceptEntity() {
-        if (!IS_COMPATIBLE || !config.entity_batching_enabled || CAPABILITIES == null) return false;
-        return CAPABILITIES.choosePath(config) != RendererCapabilityState.RenderPath.VANILLA;
+        if (!IS_COMPATIBLE || config == null) return false;
+        return BACKEND_MANAGER.select() != RendererBackendManager.Backend.VANILLA;
     }
 
     public static void disableFeature(RendererCapabilityState.Feature feature, Throwable error) {
         if (CAPABILITIES != null) CAPABILITIES.markFailed(feature, error);
-        if (feature == RendererCapabilityState.Feature.GPU_BATCHING && CAPABILITIES != null &&
-                CAPABILITIES.choosePath(config) == RendererCapabilityState.RenderPath.VANILLA) {
-            IS_ENABLED = false;
-        }
     }
 }
 

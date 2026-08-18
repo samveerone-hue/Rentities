@@ -1,5 +1,7 @@
 package me.balancinglight.rentities.entities;
 
+import me.balancinglight.rentities.render.RendererBackendManager;
+
 import me.balancinglight.rentities.Rentities;
 import me.balancinglight.rentities.RendererCapabilityState;
 import me.balancinglight.rentities.gl.GlShader;
@@ -38,6 +40,8 @@ import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER;
 import static org.lwjgl.opengl.GL31C.glDrawElementsInstanced;
 
 public class EntityBatchRenderer {
+    private final RendererBackendManager backendManager = new RendererBackendManager();
+
 
     /**
      * Invokes a reflective MethodHandle used by the compatibility accessor layer.
@@ -274,7 +278,11 @@ public class EntityBatchRenderer {
     }
 
     public static void beginWorldRender(Matrix4f positionMatrix, Matrix4f projectionMatrix) {
-        if (INSTANCE != null) INSTANCE.passPrepared = false;
+        if (INSTANCE != null) {
+            INSTANCE.passPrepared = false;
+            INSTANCE.renderFrame++;
+            INSTANCE.asyncVisibility.beginFrame(INSTANCE.renderFrame);
+        }
         setViewMatrix(positionMatrix);
         updateProjectionMatrix(projectionMatrix);
         prepareForEntityPass();
@@ -312,7 +320,6 @@ public class EntityBatchRenderer {
     }
 
     private void doFlush() {
-        renderFrame++;
         int count = Math.min(queueSize.getAndSet(0), MAX_QUEUE);
         if (count == 0) return;
 
@@ -325,7 +332,13 @@ public class EntityBatchRenderer {
         int bufIdx = currentBufferIdx;
         fenceRing.waitFor(bufIdx);
 
-        if (storedViewProjection == null || entityShader == null) return;
+        if (storedViewProjection == null || entityShader == null || meshBaker.getVaoId() == 0) {
+            if (Rentities.IS_DEBUG) {
+                Rentities.LOGGER.warn("[Rentities] Batch flush aborted: render resources not ready");
+            }
+            clearQueuedReferences(count);
+            return;
+        }
 
         // Sorted-order copy straight into the mapped slot. The contiguous run index is
         // also written into the existing texture-layer slot so the culling shader can
@@ -359,6 +372,9 @@ public class EntityBatchRenderer {
 
         stateGuard.capture();
         stateCache.reset();
+        // GlStateGuard restores external GL state independently of this cache.
+        // Never carry a texture binding assumption across render passes.
+        lastBoundGlTexId = 0;
         try {
             // Bind shader and upload uniforms. Cache is only valid inside this guarded pass.
             stateCache.useProgram(entityShader.id);
@@ -447,12 +463,10 @@ public class EntityBatchRenderer {
                  * compute/culling backend remains available as an explicit opt-in
                  * optimization, but it cannot make a valid batch disappear.
                  */
-                boolean indirect = Rentities.config.entity_indirect_culling
-                        && cullPipeline != null
-                        && cullPipeline.isAvailable()
-                        && storedViewProjection != null
-                        && Rentities.CAPABILITIES != null
-                        && Rentities.CAPABILITIES.indirectAllowed(Rentities.config);
+                RendererBackendManager.Backend backend = selectRenderBackend();
+                boolean indirect = backend == RendererBackendManager.Backend.GPU_INDIRECT
+                        && cullPipeline != null && cullPipeline.isAvailable()
+                        && storedViewProjection != null;
                 if (indirect) {
                     try {
                         indirect = renderIndirect(count, bufIdx);
@@ -496,6 +510,14 @@ public class EntityBatchRenderer {
     }
 
     private final long[] sortKeys = new long[MAX_QUEUE];
+
+    private void clearQueuedReferences(int count) {
+        for (int i = 0; i < count; i++) {
+            queuedTypes[i] = null;
+            extractionTypes[i] = null;
+            queuedOriginalIndices[i] = 0;
+        }
+    }
 
     private void sortByEntityType(int count) {
         for (int i = 0; i < count; i++) {
@@ -821,10 +843,19 @@ public class EntityBatchRenderer {
         lastBoundGlTexId = 0;
     }
 
+
+    private RendererBackendManager.Backend selectRenderBackend() {
+        return backendManager.select();
+    }
+
+
     private void bindTextureUnit0(int glId) {
-        if (glId <= 0 || glId == lastBoundGlTexId) return;
+        if (glId <= 0) return;
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, glId);
+        int bound = org.lwjgl.opengl.GL11C.glGetInteger(GL_TEXTURE_BINDING_2D);
+        if (bound != glId || lastBoundGlTexId != glId) {
+            glBindTexture(GL_TEXTURE_2D, glId);
+        }
         glUniform1i(uEntityTextures, 0);
         lastBoundGlTexId = glId;
     }
@@ -1046,7 +1077,6 @@ public class EntityBatchRenderer {
     }
 
     public boolean asyncVisibilityAllows(Entity entity) {
-        asyncVisibility.beginFrame(renderFrame);
         return asyncVisibility.shouldBatch(entity, cameraX, cameraY, cameraZ,
                 Rentities.config.async_visibility_enabled,
                 Rentities.config.async_visibility_refresh_frames,
@@ -1055,8 +1085,11 @@ public class EntityBatchRenderer {
     }
 
     public boolean canBatchEntity(EntityType<?> type) {
-        if (type == null || entityShader == null || uViewProjection < 0 || uEntityTextures < 0) return false;
-        if (Rentities.CAPABILITIES == null || Rentities.CAPABILITIES.choosePath(Rentities.config) == RendererCapabilityState.RenderPath.VANILLA) return false;
+        if (type == null || !passPrepared || storedViewProjection == null || entityShader == null
+                || uViewProjection < 0 || uEntityTextures < 0) return false;
+        if (meshBaker.getVaoId() == 0) return false;
+        if (Rentities.CAPABILITIES == null ||
+                Rentities.CAPABILITIES.choosePath(Rentities.config) == RendererCapabilityState.RenderPath.VANILLA) return false;
         if (!meshBaker.getMeshInfoMap().containsKey(type) || entityTexFailed.contains(type)) return false;
 
         Integer glId = entityGlTexIds.get(type);
@@ -1086,6 +1119,7 @@ public class EntityBatchRenderer {
     public void delete() {
         asyncPreparation.shutdown();
         asyncVisibility.shutdown();
+        EntityGlTextureResolver.invalidateCache();
         if (entityShader != null) entityShader.delete();
         fenceRing.deleteAll();
         instanceBuffer.delete();

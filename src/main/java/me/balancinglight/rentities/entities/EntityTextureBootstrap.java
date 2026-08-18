@@ -82,9 +82,7 @@ public final class EntityTextureBootstrap {
                 Rentities.LOGGER.warn("State-based texture resolution failed for {}: {}", type, t.toString());
             }
         }
-
-        // A small compatibility fallback for renderers which expose a fixed texture field.
-        return findTextureField(renderer);
+        return null;
     }
 
     private static Method invokeTextureMethod(Class<?> cls, String name, Object state) {
@@ -138,20 +136,4 @@ public final class EntityTextureBootstrap {
         return null;
     }
 
-    private static Object findTextureField(EntityRenderer<?, ?> renderer) {
-        Class<?> cls = renderer.getClass();
-        while (cls != null && cls != Object.class) {
-            for (java.lang.reflect.Field f : cls.getDeclaredFields()) {
-                String typeName = f.getType().getSimpleName();
-                if (!typeName.equals("ResourceLocation") && !typeName.equals("Identifier")) continue;
-                try {
-                    f.setAccessible(true);
-                    Object loc = f.get(renderer);
-                    if (loc != null) return loc;
-                } catch (Throwable ignored) {}
-            }
-            cls = cls.getSuperclass();
-        }
-        return null;
-    }
 }

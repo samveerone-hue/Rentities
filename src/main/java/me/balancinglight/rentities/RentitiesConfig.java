@@ -8,6 +8,16 @@ import java.io.*;
 import java.nio.file.Path;
 
 public class RentitiesConfig {
+    public enum RendererBackendMode {
+        AUTO,
+        VANILLA,
+        CPU,
+        GPU,
+        INDIRECT
+    }
+
+    public RendererBackendMode rendererBackend = RendererBackendMode.AUTO;
+
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path CONFIG_PATH = FabricLoader.getInstance()
@@ -15,7 +25,6 @@ public class RentitiesConfig {
 
     // Entity batching
     public boolean entity_batching_enabled = true;
-    public boolean entity_indirect_culling = false;
     public boolean entity_scan_mode        = true;
     public boolean entity_batching_debug        = false;
     public boolean gpu_frustum_culling_enabled = true;

@@ -53,7 +53,7 @@ public final class RendererCapabilityState {
             s.ssbo = s.gl43 && glGetInteger(GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS) > 0;
             s.compute = s.gl43 && hasExtension("GL_ARB_compute_shader");
             s.persistentMapping = s.gl43 && hasExtension("GL_ARB_buffer_storage");
-            s.indirect = s.gl43 && s.persistentMapping && s.compute && hasExtension("GL_ARB_multi_draw_indirect");
+            s.indirect = s.gl43 && s.compute && hasExtension("GL_ARB_multi_draw_indirect");
             ClientShaderCompatibilityBackend shaderBackend = new ClientShaderCompatibilityBackend();
             s.irisLoaded = !shaderBackend.allowsCustomRentitiesShader();
             s.customShader = s.gl43 && glGetInteger(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS) > 0 && shaderBackend.allowsCustomRentitiesShader();
@@ -61,9 +61,13 @@ public final class RendererCapabilityState {
             Rentities.LOGGER.info("[Rentities] Capabilities: GL={}, vendor={}, SSBO={}, compute={}, indirect={}, persistent={}, iris={}",
                     version, vendor, s.ssbo, s.compute, s.indirect, s.persistentMapping, s.irisLoaded);
 
-            if (!s.gl43 || !s.ssbo || !s.compute || !s.indirect) {
+            if (!s.gl43 || !s.ssbo) {
                 s.gpuBatchingHealthy = false;
-                s.gpuBatchingReason = "OpenGL 4.3 compute/SSBO/indirect support unavailable";
+                s.gpuBatchingReason = "OpenGL 4.3+ SSBO support unavailable";
+            }
+            if (!s.compute || !s.indirect) {
+                s.indirectHealthy = false;
+                s.indirectReason = "Compute/indirect draw support unavailable";
             }
             // Rentities' custom shader path must not compete with Iris until a real shader backend exists.
             if (s.irisLoaded) {
@@ -121,10 +125,9 @@ public final class RendererCapabilityState {
     public boolean indirectAllowed(RentitiesConfig cfg) { return cfg.gpu_frustum_culling_enabled && indirect && indirectHealthy && gpuBatchingHealthy; }
 
     public RenderPath choosePath(RentitiesConfig cfg) {
-        if (!cfg.entity_batching_enabled) return RenderPath.VANILLA;
-        if (!customShaderAllowed() || !meshGpuAllowed()) return RenderPath.VANILLA;
-        if (gpuBatchingAllowed(cfg)) return RenderPath.GPU_BATCHING;
-        return RenderPath.CPU_INSTANCED;
+        if (cfg == null || !cfg.entity_batching_enabled) return RenderPath.VANILLA;
+        if (!gpuBatchingAllowed(cfg)) return RenderPath.VANILLA;
+        return RenderPath.GPU_BATCHING;
     }
 
     public void markFailed(Feature feature, Throwable error) {

@@ -37,7 +37,7 @@ public class RentitiesConfigGui implements ConfigEntryPoint {
                     value -> {
                         store.getData().entity_batching_enabled = value;
                         store.save();
-                        Rentities.IS_ENABLED = Rentities.IS_COMPATIBLE && value;
+                        Rentities.checkAndEnable();
                         if (!value) {
                             // Disable: delete renderer so entities fall back to vanilla immediately
                             if (EntityBatchRenderer.INSTANCE != null) {
@@ -134,7 +134,7 @@ public class RentitiesConfigGui implements ConfigEntryPoint {
                 .setName(Component.literal("Fast Animation LOD"))
                 .setTooltip(Component.literal(
                     "Reduces animation work at distance while keeping GPU entity batching."))
-                .setDefaultValue(true)
+                .setDefaultValue(false)
                 .setImpact(OptionImpact.HIGH)
                 .setEnabledProvider(c -> Rentities.IS_COMPATIBLE)
                 .setBinding(

@@ -11,6 +11,7 @@ import me.balancinglight.rentities.gl.StandardInstanceBufferBackend;
 import me.balancinglight.rentities.gl.GpuSync;
 import me.balancinglight.rentities.gl.GlStateCache;
 import net.minecraft.client.Minecraft;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryUtil;
@@ -57,6 +58,9 @@ public class EntityBatchRenderer {
 
 
     public static EntityBatchRenderer INSTANCE;
+    private final AsyncRenderPreparation asyncPreparation;
+    private final AsyncVisibilityManager asyncVisibility;
+    private long renderFrame;
 
     private static final int MAX_QUEUE = EntityInstance.MAX_INSTANCES;
     private static final EntityType<?>[] queuedTypes = new EntityType[MAX_QUEUE];
@@ -104,8 +108,6 @@ public class EntityBatchRenderer {
 
     private final EntityMeshBaker meshBaker;
     private final EntityErrorRenderer errorRenderer;
-    private final EntityTextureAtlas textureAtlas;
-    private final EntitySkinCache skinCache;
 
     private static final Map<Class<?>, Map<String, Field>> fieldCache = new ConcurrentHashMap<>();
 
@@ -124,10 +126,10 @@ public class EntityBatchRenderer {
 
     public EntityBatchRenderer() {
         INSTANCE = this;
+        this.asyncPreparation = new AsyncRenderPreparation();
+        this.asyncVisibility = new AsyncVisibilityManager();
         this.meshBaker = new EntityMeshBaker();
         this.errorRenderer = new EntityErrorRenderer();
-        this.textureAtlas = new EntityTextureAtlas();
-        this.skinCache = new EntitySkinCache();
 
         // Prefer persistent mapping, but retain a standard SSBO upload backend so GPU
         // batching can survive on drivers that expose the required GL 4.3 path without
@@ -307,6 +309,7 @@ public class EntityBatchRenderer {
     }
 
     private void doFlush() {
+        renderFrame++;
         int count = Math.min(queueSize.getAndSet(0), MAX_QUEUE);
         if (count == 0) return;
 
@@ -318,21 +321,6 @@ public class EntityBatchRenderer {
         currentBufferIdx = (currentBufferIdx + 1) % NUM_BUFFERS;
         int bufIdx = currentBufferIdx;
         fenceRing.waitFor(bufIdx);
-
-        textureAtlas.processUploads();
-        skinCache.processUploads();
-
-        if (meshBaker.pendingTextureSave) {
-            meshBaker.pendingTextureSave = false;
-            textureAtlas.saveTextureCache();
-        }
-
-        if (!textureCacheLoaded) {
-            textureCacheLoaded = true;
-            if (!Rentities.config.entity_scan_mode) {
-                textureAtlas.loadTextureCache();
-            }
-        }
 
         if (storedViewProjection == null || entityShader == null) return;
 
@@ -552,6 +540,21 @@ public class EntityBatchRenderer {
 
         int groups = cullPipeline.groupCount();
         if (groups == 0) return false;
+
+        // Conservative compatibility guard: keep GPU entity batching/instancing enabled,
+        // but do not submit non-player groups through the indirect+frustum path until the
+        // per-group visibility contract is proven against all 1.21.11 render-state variants.
+        // The direct instanced path uses the same SSBO/VAO/shader and therefore preserves
+        // the core batching feature while avoiding the hitbox-only regression.
+        for (int g = 0; g < groups; g++) {
+            if (groupTypes[g] != net.minecraft.world.entity.EntityType.PLAYER) {
+                if (Rentities.IS_DEBUG) {
+                    Rentities.LOGGER.info("[Rentities] Indirect culling bypassed for non-player batch; using direct instanced draw");
+                }
+                for (int i = 0; i < groups; i++) groupTypes[i] = null;
+                return false;
+            }
+        }
 
         cullPipeline.dispatch(count, storedViewProjection);
         stateCache.reset();
@@ -1016,6 +1019,27 @@ public class EntityBatchRenderer {
         }
     }
 
+    public boolean asyncAllowsBatch(EntityType<?> type) {
+        if (Rentities.config.async_render_preparation_enabled) {
+            return asyncPreparation.allowsBatch(type,
+                    Rentities.config.entity_batching_whitelist_only,
+                    new java.util.HashSet<>(Rentities.config.entity_batching_whitelist),
+                    new java.util.HashSet<>(Rentities.config.entity_batching_blacklist));
+        }
+        return !Rentities.config.entity_batching_blacklist.contains(type.toShortString())
+                && (!Rentities.config.entity_batching_whitelist_only
+                    || Rentities.config.entity_batching_whitelist.contains(type.toShortString()));
+    }
+
+    public boolean asyncVisibilityAllows(Entity entity) {
+        asyncVisibility.beginFrame(renderFrame);
+        return asyncVisibility.shouldBatch(entity, cameraX, cameraY, cameraZ,
+                Rentities.config.async_visibility_enabled,
+                Rentities.config.async_visibility_refresh_frames,
+                Rentities.config.async_visibility_max_age_frames,
+                Rentities.config.async_visibility_max_distance);
+    }
+
     public boolean canBatchEntity(EntityType<?> type) {
         if (type == null || entityShader == null || uViewProjection < 0 || uEntityTextures < 0) return false;
         if (Rentities.CAPABILITIES == null || Rentities.CAPABILITIES.choosePath(Rentities.config) == RendererCapabilityState.RenderPath.VANILLA) return false;
@@ -1046,6 +1070,8 @@ public class EntityBatchRenderer {
     }
 
     public void delete() {
+        asyncPreparation.shutdown();
+        asyncVisibility.shutdown();
         if (entityShader != null) entityShader.delete();
         fenceRing.deleteAll();
         instanceBuffer.delete();
@@ -1053,8 +1079,6 @@ public class EntityBatchRenderer {
         if (extractionBuffer != 0) MemoryUtil.nmemFree(extractionBuffer);
         meshBaker.delete();
         errorRenderer.delete();
-        textureAtlas.delete();
-        skinCache.delete();
         INSTANCE = null;
     }
 }

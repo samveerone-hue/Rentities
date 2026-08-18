@@ -1015,7 +1015,7 @@ public class EntityMeshBaker {
     public int getPivotSSBOId() { return pivotSSBOId; }
 
     private static final int CACHE_MAGIC   = 0xECAC1021;
-    private static final int CACHE_VERSION = 4;
+    private static final int CACHE_VERSION = 6;
 
     /** Cache file location: .minecraft/rentities_entity_mesh_cache.bin */
     private static java.io.File cacheFile = null;
@@ -1216,7 +1216,6 @@ public class EntityMeshBaker {
 
     public static boolean cacheExists() { return getCacheFile().exists(); }
     public static void deleteCache()    { getCacheFile().delete(); }
-    public static void deleteTextureCache() { EntityTextureAtlas.deleteTextureCache(); }
 
     public void delete() {
         cacheExecutor.shutdown();

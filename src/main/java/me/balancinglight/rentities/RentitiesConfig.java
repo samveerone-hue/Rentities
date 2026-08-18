@@ -20,6 +20,16 @@ public class RentitiesConfig {
     public boolean gpu_frustum_culling_enabled = true;
     public boolean entity_batching_debug_solid  = false;
 
+    // Async preparation / conservative visibility
+    public boolean async_render_preparation_enabled = true;
+    public boolean async_visibility_enabled = false;
+    public int async_visibility_refresh_frames = 4;
+    public int async_visibility_max_age_frames = 12;
+    public double async_visibility_max_distance = 0.0;
+    public java.util.List<String> entity_batching_whitelist = new java.util.ArrayList<>();
+    public boolean entity_batching_whitelist_only = false;
+    public java.util.List<String> entity_batching_blacklist = new java.util.ArrayList<>();
+
     // GPU animation / distance LOD
     public boolean fast_animation_lod_enabled = false;
     public float fast_animation_lod_medium_distance = 48.0f;

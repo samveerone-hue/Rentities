@@ -14,8 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Resolves OpenGL texture names from Minecraft 1.21.11 texture identifiers.
  *
  * 1.21.11 no longer exposes the old TextureManager.bindTexture path. In particular,
- * intermediary method_4615 is destroyTexture, not bindTexture. Calling it here would
- * destroy the very texture Rentities was trying to render.
+ * The old TextureManager bind/destroy reflection path is deliberately not used.
  *
  * The 1.21.11 path is:
  *   TextureManager.getTexture (method_4619)

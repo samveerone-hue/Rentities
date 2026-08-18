@@ -56,6 +56,43 @@ public class RentitiesConfigGui implements ConfigEntryPoint {
         );
 
         page.addOption(
+            builder.createBooleanOption(Identifier.parse("rentities:async_preparation"))
+                .setName(Component.literal("Async Render Preparation"))
+                .setTooltip(Component.literal("Prepares immutable entity-type metadata off-thread. Unknown results always fall back safely."))
+                .setDefaultValue(true)
+                .setImpact(OptionImpact.LOW)
+                .setEnabledProvider(c -> Rentities.IS_COMPATIBLE)
+                .setBinding(value -> { store.getData().async_render_preparation_enabled = value; store.save(); },
+                            () -> store.getData().async_render_preparation_enabled)
+                .setStorageHandler(noSave)
+        );
+
+        page.addOption(
+            builder.createBooleanOption(Identifier.parse("rentities:async_visibility"))
+                .setName(Component.literal("Async Conservative Visibility"))
+                .setTooltip(Component.literal("Optional background distance visibility hint. Unknown or stale results are always kept visible."))
+                .setDefaultValue(false)
+                .setImpact(OptionImpact.MEDIUM)
+                .setEnabledProvider(c -> Rentities.IS_COMPATIBLE)
+                .setBinding(value -> { store.getData().async_visibility_enabled = value; store.save(); },
+                            () -> store.getData().async_visibility_enabled)
+                .setStorageHandler(noSave)
+        );
+
+        page.addOption(
+            builder.createBooleanOption(Identifier.parse("rentities:async_whitelist_only"))
+                .setName(Component.literal("Batch Whitelist Only"))
+                .setTooltip(Component.literal("When enabled, only entity IDs listed in the config whitelist may use GPU batching; others use vanilla."))
+                .setDefaultValue(false)
+                .setImpact(OptionImpact.MEDIUM)
+                .setEnabledProvider(c -> Rentities.IS_COMPATIBLE)
+                .setBinding(value -> {
+                    store.getData().entity_batching_whitelist_only = value; store.save();
+                }, () -> store.getData().entity_batching_whitelist_only)
+                .setStorageHandler(noSave)
+        );
+
+        page.addOption(
             builder.createBooleanOption(Identifier.parse("rentities:gpu_culling"))
                 .setName(Component.literal("GPU Frustum Culling"))
                 .setTooltip(Component.literal(
@@ -135,7 +172,7 @@ public class RentitiesConfigGui implements ConfigEntryPoint {
                 .setImpact(OptionImpact.HIGH)
                 .setEnabledProvider(c -> EntityMeshBaker.cacheExists())
                 .setBinding(
-                    value -> { if (value) { EntityMeshBaker.deleteCache(); EntityMeshBaker.deleteTextureCache(); } },
+                    value -> { if (value) { EntityMeshBaker.deleteCache(); } },
                     () -> false
                 )
                 .setStorageHandler(noSave)

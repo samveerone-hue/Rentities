@@ -1,5 +1,9 @@
 #version 460 core
 
+const int FLAG_SLIME = 1;
+const int FLAG_MAGMA_CUBE = 2;
+
+
 in vec2      vTexCoord;
 in flat int  vFlags;
 in vec3      vNormal;

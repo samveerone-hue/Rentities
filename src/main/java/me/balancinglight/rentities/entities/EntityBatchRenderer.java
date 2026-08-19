@@ -391,6 +391,7 @@ public class EntityBatchRenderer {
                     ? (float)(mc.level.getGameTime() % 100000L) + partialTick
                     : partialTick;
             glUniform1f(uGameTime, gameTime);
+            if (uSlimeOverlay >= 0) glUniform1i(uSlimeOverlay, 0);
             if (uCameraPos >= 0) {
                 var cam = mc.gameRenderer.getMainCamera().position();
                 glUniform3f(uCameraPos, (float) cam.x, (float) cam.y, (float) cam.z);
@@ -637,9 +638,10 @@ public class EntityBatchRenderer {
                     var meshInfo = meshInfoMap.get(currentType);
                     if (meshInfo != null) {
                         bindEntityTexture(currentType);
-                        boolean translucentSlime = currentType == EntityType.SLIME || currentType == EntityType.MAGMA_CUBE;
-                        glDepthMask(!translucentSlime);
+                        boolean slime = currentType == EntityType.SLIME || currentType == EntityType.MAGMA_CUBE;
                         glUniform1i(uBaseInstance, instanceOffset);
+                        if (uSlimeOverlay >= 0) glUniform1i(uSlimeOverlay, 0);
+                        glDepthMask(true);
                         if (Rentities.IS_DEBUG && (System.currentTimeMillis() % 2000 < 50)) {
                             Rentities.LOGGER.info("DRAW: type={}, count={}, indexCount={}, indexOffset={}, baseInstance={}",
                                 currentType, currentCount, meshInfo.indexCount, meshInfo.indexOffset, instanceOffset);
@@ -647,7 +649,19 @@ public class EntityBatchRenderer {
                         glDrawElementsInstanced(
                                 GL_TRIANGLES, meshInfo.indexCount, GL_UNSIGNED_INT,
                                 (long)meshInfo.indexOffset, currentCount);
-                        if (translucentSlime) glDepthMask(true);
+
+                        if (slime) {
+                            // Second pass: translucent outer shell around the inner slime model.
+                            if (uSlimeOverlay >= 0) glUniform1i(uSlimeOverlay, 1);
+                            glDepthMask(false);
+                            glDisable(GL_CULL_FACE);
+                            glDrawElementsInstanced(
+                                    GL_TRIANGLES, meshInfo.indexCount, GL_UNSIGNED_INT,
+                                    (long)meshInfo.indexOffset, currentCount);
+                            glEnable(GL_CULL_FACE);
+                            glDepthMask(true);
+                            if (uSlimeOverlay >= 0) glUniform1i(uSlimeOverlay, 0);
+                        }
                     } else {
                         if (Rentities.IS_DEBUG) {
                             Rentities.LOGGER.warn("SKIP_NO_MESH: type={}, count={} — no meshInfo found!", currentType, currentCount);

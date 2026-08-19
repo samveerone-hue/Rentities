@@ -4,6 +4,7 @@ import me.balancinglight.rentities.Rentities;
 import me.balancinglight.rentities.entities.EntityBatchRenderer;
 import me.balancinglight.rentities.entities.EntityDirectExtractor;
 import net.minecraft.client.Camera;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
@@ -61,6 +62,13 @@ public class MixinLevelRenderer {
     private void extractEntityDirect(Entity entity, float partialTick,
                                      CallbackInfoReturnable<EntityRenderState> cir) {
         if (!Rentities.IS_ENABLED) return;
+        // Camera mods such as Zoomify can update the active camera during the frame.
+        // Refresh the extraction origin immediately before batching so entity positions
+        // stay anchored to the same camera used by the active world render.
+        Vec3 camPos = Minecraft.getInstance().gameRenderer.getMainCamera().position();
+        EntityBatchRenderer.cameraX = camPos.x;
+        EntityBatchRenderer.cameraY = camPos.y;
+        EntityBatchRenderer.cameraZ = camPos.z;
         EntityBatchRenderer.ensurePrepared();
         if (EntityDirectExtractor.tryExtract(entity, partialTick)) {
             cir.setReturnValue(EntityDirectExtractor.SENTINEL);

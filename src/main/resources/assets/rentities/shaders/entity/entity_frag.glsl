@@ -12,6 +12,7 @@ out vec4 fragColor;
 
 // Minecraft entity texture bound directly per draw call — no atlas
 uniform sampler2D uEntityTexture;
+uniform int uSlimeOverlay;
 
 #define FLAG_IS_INVISIBLE 64
 #define FLAG_HAS_GLINT    4
@@ -26,7 +27,9 @@ void main() {
 
     float blockLight = float((vPackedLight >> 4) & 15) / 15.0;
     float skyLight = float((vPackedLight >> 20) & 15) / 15.0;
-    float light = 0.08 + 0.92 * max(blockLight, skyLight);
+    // Use the packed Minecraft light level directly. The old artificial 0.08 floor
+    // made dark areas visibly brighter than vanilla.
+    float light = max(blockLight, skyLight);
     vec3 color = tex.rgb * light;
 
     // Hurt flash (red overlay)
@@ -40,5 +43,10 @@ void main() {
         color += vec3(0.5, 0.2, 0.8) * glint * 0.3;
     }
 
-    fragColor = vec4(color, tex.a);
+    float alpha = tex.a;
+    if (uSlimeOverlay != 0 && (vMaterialFlags & FLAG_SLIME) != 0) {
+        // Vanilla has a translucent outer slime shell around its opaque inner model.
+        alpha *= 0.65;
+    }
+    fragColor = vec4(color, alpha);
 }

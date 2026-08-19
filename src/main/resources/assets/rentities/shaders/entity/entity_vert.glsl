@@ -1055,8 +1055,9 @@ void main() {
             localNrm.x * s + localNrm.z * c);
 
     if ((inst.materialFlags & FLAG_SLIME) != 0) {
-        rotPos.xz *= max(inst.slimeScaleXZ, 0.01);
-        rotPos.y *= max(inst.slimeScaleY, 0.01);
+        float shell = (uSlimeOverlay != 0) ? 1.06 : 1.0;
+        rotPos.xz *= max(inst.slimeScaleXZ * shell, 0.01);
+        rotPos.y *= max(inst.slimeScaleY * shell, 0.01);
     }
 
     // Pixels -> blocks (x0.0625) + camera-relative world position

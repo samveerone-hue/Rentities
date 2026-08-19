@@ -1,5 +1,8 @@
 package me.balancinglight.rentities.entities;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodHandle;
+
 import me.balancinglight.rentities.Rentities;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.entity.ArmorStandRenderer;
@@ -132,6 +135,16 @@ public final class EntityDirectExtractor {
         }
     }
 
+    private static MethodHandle livingBodyYawClampHandle(Class<?> cls) {
+        try {
+            return MethodHandles.privateLookupIn(cls, MethodHandles.lookup())
+                    .findStatic(cls, "clampBodyYaw",
+                            java.lang.invoke.MethodType.methodType(float.class, LivingEntity.class, float.class, float.class));
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     private static boolean writeInternal(long ptr, Entity entity, EntityType<?> type, float partialTick) {
         Vec3 pos = entity.getPosition(partialTick);
 
@@ -245,6 +258,28 @@ public final class EntityDirectExtractor {
                         partialTick,
                         living.yBodyRotO,
                         living.yBodyRot);
+
+                // Vanilla LivingEntityRenderer clamps body yaw before setupTransforms.
+                // Some entities (and camera/AI states) can have body/head yaw divergence;
+                // using raw yBodyRot makes the GPU model face differently from vanilla.
+                try {
+                    var renderer = Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(entity);
+                    MethodHandle clamp = livingBodyYawClampHandle(renderer.getClass().getSuperclass());
+                    if (clamp != null) {
+                        // Renderer superclass lookup: LivingEntityRenderer declares the private helper.
+                        Class<?> c = renderer.getClass();
+                        while (c != null) {
+                            clamp = livingBodyYawClampHandle(c);
+                            if (clamp != null) break;
+                            c = c.getSuperclass();
+                        }
+                    }
+                    if (clamp != null) {
+                        bodyYawDeg = (float) clamp.invokeWithArguments(living, bodyYawDeg, partialTick);
+                    }
+                } catch (Throwable ignored) {
+                    // Fall back to interpolated body yaw if a renderer does not expose vanilla clamp.
+                }
 
                 limbSwing = living.walkAnimation.position(partialTick);
                 limbSwingAmt = Math.min(

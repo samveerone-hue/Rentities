@@ -110,6 +110,7 @@ uniform float uAnimationLodMediumDistance;
 uniform float uAnimationLodFarDistance;
 uniform float uAnimationLodMediumScale;
 uniform vec3 uCameraPos;
+uniform int uSlimeOverlay;
 
 float gWalkSin;
 float gWalkCos;

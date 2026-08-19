@@ -407,6 +407,10 @@ public final class EntityDirectExtractor {
             flags |= EntityInstance.FLAG_IS_PLAYER;
         }
 
+        if (entity instanceof Slime) {
+            flags |= EntityInstance.FLAG_SLIME;
+        }
+
         if (EntityBatchRegistry.hasZombieArms(type)) {
             flags |= EntityInstance.FLAG_ZOMBIE_ARMS;
         }
@@ -427,6 +431,21 @@ public final class EntityDirectExtractor {
         MemoryUtil.memPutInt(
                 ptr + EntityInstance.OFFSET_ENTITY_TYPE,
                 EntityBatchRegistry.getEntityTypeIndex(type));
+
+        // Vanilla packed light and slime render-state payload. These values are computed
+        // before the animation/flag work above and must be written into the SSBO; leaving
+        // them at the zero/default value makes the shader render entities black and leaves
+        // slimes at unit scale with their translucent material path disabled.
+        MemoryUtil.memPutInt(
+                ptr + EntityInstance.OFFSET_PACKED_LIGHT, packedLight);
+        MemoryUtil.memPutFloat(
+                ptr + EntityInstance.OFFSET_SLIME_SCALE_XZ, slimeScaleXZ);
+        MemoryUtil.memPutFloat(
+                ptr + EntityInstance.OFFSET_SLIME_SCALE_Y, slimeScaleY);
+        MemoryUtil.memPutInt(
+                ptr + EntityInstance.OFFSET_MATERIAL_FLAGS,
+                (type == EntityType.SLIME || type == EntityType.MAGMA_CUBE)
+                        ? EntityInstance.FLAG_SLIME : 0);
 
         MemoryUtil.memPutInt(
                 ptr + EntityInstance.OFFSET_ANIM_CATEGORY,

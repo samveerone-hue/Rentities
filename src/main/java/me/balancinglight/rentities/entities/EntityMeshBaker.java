@@ -981,13 +981,26 @@ public class EntityMeshBaker {
         if (pivotSSBOId != 0) uploadPivotSSBO();
     }
 
-    private Map<EntityType<?>, CpuMesh> snapshotCpuMeshes() {
-        return new LinkedHashMap<>(cpuMeshes);
+    private synchronized Map<EntityType<?>, CpuMesh> snapshotCpuMeshes() {
+        Map<EntityType<?>, CpuMesh> snapshot = new LinkedHashMap<>(cpuMeshes.size());
+        for (Map.Entry<EntityType<?>, CpuMesh> entry : cpuMeshes.entrySet()) {
+            CpuMesh mesh = entry.getValue();
+            snapshot.put(entry.getKey(), new CpuMesh(
+                    Arrays.copyOf(mesh.vertices(), mesh.vertices().length),
+                    Arrays.copyOf(mesh.indices(), mesh.indices().length)));
+        }
+        return snapshot;
     }
 
-    private void saveCurrentMeshesToCacheAsync() {
+    private synchronized void saveCurrentMeshesToCacheAsync() {
         final java.io.File target = getCacheFile(); // resolve on the render thread
-        Map<EntityType<?>, CpuMesh> snapshot = snapshotCpuMeshes();
+        Map<EntityType<?>, CpuMesh> snapshot = new LinkedHashMap<>(cpuMeshes.size());
+        for (Map.Entry<EntityType<?>, CpuMesh> entry : cpuMeshes.entrySet()) {
+            CpuMesh mesh = entry.getValue();
+            snapshot.put(entry.getKey(), new CpuMesh(
+                    Arrays.copyOf(mesh.vertices(), mesh.vertices().length),
+                    Arrays.copyOf(mesh.indices(), mesh.indices().length)));
+        }
         final float[] pivotDataSnapshot = Arrays.copyOf(bonePivotData, bonePivotData.length);
         final boolean[] pivotWrittenSnapshot = Arrays.copyOf(bonePivotWritten, bonePivotWritten.length);
         cacheExecutor.execute(() -> saveCpuMeshesToCache(
@@ -1189,12 +1202,20 @@ public class EntityMeshBaker {
                 if (vLen < 0 || vLen > MAX_VERTEX_FLOATS_PER_MESH || vLen % 9 != 0) {
                     throw new java.io.IOException("invalid vertex length " + vLen + " for " + id);
                 }
+                long vertexBytes = (long) vLen * Float.BYTES;
+                if ((long) in.available() < vertexBytes + Integer.BYTES) {
+                    throw new java.io.IOException("truncated vertex payload for " + id);
+                }
                 float[] verts = new float[vLen];
                 for (int j = 0; j < vLen; j++) verts[j] = in.readFloat();
 
                 int iLen = in.readInt();
                 if (iLen < 0 || iLen > MAX_INDICES_PER_MESH) {
                     throw new java.io.IOException("invalid index length " + iLen + " for " + id);
+                }
+                long indexPayload = (long) iLen * Integer.BYTES + 3L * Integer.BYTES;
+                if ((long) in.available() < indexPayload) {
+                    throw new java.io.IOException("truncated index/metadata payload for " + id);
                 }
                 int[] inds = new int[iLen];
                 for (int j = 0; j < iLen; j++) inds[j] = in.readInt();
@@ -1227,12 +1248,19 @@ public class EntityMeshBaker {
             if (pivotLen < 0 || pivotLen > 1_000_000 || pivotLen % 4 != 0) {
                 throw new java.io.IOException("invalid pivot float length " + pivotLen);
             }
+            long pivotPayload = (long) pivotLen * Float.BYTES + Integer.BYTES;
+            if ((long) in.available() < pivotPayload) {
+                throw new java.io.IOException("truncated pivot payload");
+            }
             loadedPivots = new float[pivotLen];
             for (int i = 0; i < pivotLen; i++) loadedPivots[i] = in.readFloat();
 
             int writtenLen = in.readInt();
             if (writtenLen < 0 || writtenLen > 250_000 || writtenLen != pivotLen / 4) {
                 throw new java.io.IOException("invalid pivot-written length " + writtenLen);
+            }
+            if ((long) in.available() < writtenLen) {
+                throw new java.io.IOException("truncated pivot-written payload");
             }
             loadedPivotWritten = new boolean[writtenLen];
             for (int i = 0; i < writtenLen; i++) loadedPivotWritten[i] = in.readBoolean();

@@ -138,8 +138,9 @@ public final class EntityDirectExtractor {
     private static MethodHandle livingBodyYawClampHandle(Class<?> cls) {
         try {
             return MethodHandles.privateLookupIn(cls, MethodHandles.lookup())
-                    .findStatic(cls, "clampBodyYaw",
-                            java.lang.invoke.MethodType.methodType(float.class, LivingEntity.class, float.class, float.class));
+                    .findVirtual(cls, "clampBodyYaw",
+                            java.lang.invoke.MethodType.methodType(
+                                    float.class, LivingEntity.class, float.class, float.class));
         } catch (Throwable ignored) {
             return null;
         }

@@ -3,6 +3,8 @@ package me.balancinglight.rentities.entities;
 import me.balancinglight.rentities.Rentities;
 import org.lwjgl.system.MemoryUtil;
 
+import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -64,8 +66,15 @@ public class EntityErrorRenderer {
         vboId = glCreateBuffers();
         eboId = glCreateBuffers();
 
-        glNamedBufferData(vboId, toFloatBuffer(CUBE_VERTS), GL_STATIC_DRAW);
-        glNamedBufferData(eboId, toIntBuffer(CUBE_INDICES),  GL_STATIC_DRAW);
+        FloatBuffer vb = toFloatBuffer(CUBE_VERTS);
+        IntBuffer ib = toIntBuffer(CUBE_INDICES);
+        try {
+            glNamedBufferData(vboId, vb, GL_STATIC_DRAW);
+            glNamedBufferData(eboId, ib, GL_STATIC_DRAW);
+        } finally {
+            MemoryUtil.memFree(vb);
+            MemoryUtil.memFree(ib);
+        }
 
         glVertexArrayVertexBuffer(vaoId, 0, vboId, 0, 3 * 4);
         glVertexArrayElementBuffer(vaoId, eboId);

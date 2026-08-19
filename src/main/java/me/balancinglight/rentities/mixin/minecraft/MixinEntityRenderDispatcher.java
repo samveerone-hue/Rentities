@@ -20,6 +20,29 @@ import java.lang.reflect.Method;
 @Mixin(targets = "net/minecraft/class_898", remap = false)
 public abstract class MixinEntityRenderDispatcher {
 
+    private static volatile java.lang.reflect.Field RENDERER_MAP_FIELD;
+    private static volatile boolean RENDERER_MAP_FIELD_LOOKED_UP;
+
+    private static synchronized java.lang.reflect.Field rendererMapField() {
+        if (RENDERER_MAP_FIELD_LOOKED_UP) return RENDERER_MAP_FIELD;
+        Class<?> dispatcherClass = net.minecraft.client.renderer.entity.EntityRenderDispatcher.class;
+        try {
+            java.lang.reflect.Field f = dispatcherClass.getDeclaredField("field_4696");
+            f.setAccessible(true);
+            RENDERER_MAP_FIELD = f;
+        } catch (NoSuchFieldException first) {
+            try {
+                java.lang.reflect.Field f = dispatcherClass.getDeclaredField("renderers");
+                f.setAccessible(true);
+                RENDERER_MAP_FIELD = f;
+            } catch (NoSuchFieldException ignored) {
+                RENDERER_MAP_FIELD = null;
+            }
+        }
+        RENDERER_MAP_FIELD_LOOKED_UP = true;
+        return RENDERER_MAP_FIELD;
+    }
+
     @Inject(method = "method_72976", at = @At("HEAD"), cancellable = true, remap = false)
     private void interceptEntityRender(
             @Coerce Object state,
@@ -91,15 +114,8 @@ public abstract class MixinEntityRenderDispatcher {
     private void tryResolveTexture(EntityBatchRenderer renderer, EntityType<?> type, Object state) {
         try {
             Object entityRenderer = null;
-            Class<?> dispatcherClass = net.minecraft.client.renderer.entity.EntityRenderDispatcher.class;
-            java.lang.reflect.Field rf = null;
-            try { rf = dispatcherClass.getDeclaredField("field_4696"); }
-            catch (NoSuchFieldException ignored) {
-                try { rf = dispatcherClass.getDeclaredField("renderers"); }
-                catch (NoSuchFieldException ignored2) {}
-            }
+            java.lang.reflect.Field rf = rendererMapField();
             if (rf != null) {
-                rf.setAccessible(true);
                 java.util.Map<?, ?> map = (java.util.Map<?, ?>) rf.get(this);
                 entityRenderer = map.get(type);
             }

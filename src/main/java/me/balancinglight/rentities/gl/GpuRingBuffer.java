@@ -40,6 +40,9 @@ public final class GpuRingBuffer {
         this.slots = slots;
         this.slotSize = bytesPerSlot;
         int align = Math.max(glGetInteger(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT), 256);
+        // SSBO alignment applies to each glBindBufferRange offset. EntityInstance.STRIDE
+        // is the logical struct stride inside the bound slot; the ring stride is rounded up
+        // independently to satisfy the hardware alignment requirement.
         this.stride = ((bytesPerSlot + align - 1) / align) * align;
 
         this.id = glCreateBuffers();

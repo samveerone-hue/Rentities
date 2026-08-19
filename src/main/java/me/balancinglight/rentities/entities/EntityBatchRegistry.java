@@ -1,13 +1,13 @@
 package me.balancinglight.rentities.entities;
 
 import net.minecraft.world.entity.EntityType;
-import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
 import java.util.Collections;
 
 public final class EntityBatchRegistry {
 
-    private static final Map<EntityType<?>, EntityAnimationCategory> REGISTRY = new HashMap<>();
+    private static final Map<EntityType<?>, EntityAnimationCategory> REGISTRY = new ConcurrentHashMap<>();
 
     static {
         reg(EntityType.ARMOR_STAND,         EntityAnimationCategory.BIPED);
@@ -114,7 +114,7 @@ public final class EntityBatchRegistry {
         reg(EntityType.WITHER,              EntityAnimationCategory.CPU_ANIMATED);
     }
 
-    private static final Map<EntityType<?>, Integer> TYPE_INDEX_MAP = new HashMap<>();
+    private static final Map<EntityType<?>, Integer> TYPE_INDEX_MAP = new ConcurrentHashMap<>();
     private static int nextTypeIndex = 0;
 
     public static int getEntityTypeIndex(EntityType<?> type) {

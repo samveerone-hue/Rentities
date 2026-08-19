@@ -13,7 +13,10 @@ public final class GpuSync {
     }
 
     public static void afterCpuUploadBeforeShaderRead() {
-        glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+        glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT
+                | GL_BUFFER_UPDATE_BARRIER_BIT
+                | GL_SHADER_STORAGE_BARRIER_BIT
+                | GL_COMMAND_BARRIER_BIT);
     }
 
     public static void afterComputeBeforeVertexRead() {

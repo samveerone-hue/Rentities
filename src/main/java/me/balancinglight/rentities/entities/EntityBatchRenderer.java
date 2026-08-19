@@ -17,6 +17,8 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryUtil;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
 import java.util.Map;
@@ -73,6 +75,9 @@ public class EntityBatchRenderer {
     private static final EntityType<?>[] extractionTypes = new EntityType[MAX_QUEUE];
     private static final int[] queuedOriginalIndices = new int[MAX_QUEUE];
     private static final AtomicInteger queueSize = new AtomicInteger(0);
+    private static final Object QUEUE_LOCK = new Object();
+    private static final ThreadLocal<Deque<Integer>> RESERVED_SLOTS =
+            ThreadLocal.withInitial(ArrayDeque::new);
     private static long extractionBuffer;
 
     // Stored VP matrix from terrain render pass
@@ -183,102 +188,108 @@ public class EntityBatchRenderer {
     public static boolean queueEntityStateDirect(Object state, double x, double y, double z,
                                                  EntityType<?> type) {
         if (INSTANCE == null) return false;
-        int idx = queueSize.getAndIncrement();
-        if (idx >= MAX_QUEUE) {
-            queueSize.decrementAndGet();
-            if (Rentities.IS_DEBUG) {
-                Rentities.LOGGER.warn(
-                        "[RentEntities] Instance queue full ({}); falling back to vanilla rendering",
-                        MAX_QUEUE);
+        synchronized (QUEUE_LOCK) {
+            int idx = queueSize.getAndIncrement();
+            if (idx >= MAX_QUEUE) {
+                queueSize.decrementAndGet();
+                if (Rentities.IS_DEBUG) {
+                    Rentities.LOGGER.warn(
+                            "[Rentities] Instance queue full ({}); falling back to vanilla rendering",
+                            MAX_QUEUE);
+                }
+                return false;
             }
-            return false;
+
+            queuedTypes[idx] = type;
+            extractionTypes[idx] = type;
+            queuedOriginalIndices[idx] = idx;
+
+            if (!INSTANCE.writeEntityInstance(
+                    extractionBuffer + (long) idx * EntityInstance.STRIDE, state, x, y, z)) {
+                queuedTypes[idx] = null;
+                extractionTypes[idx] = null;
+                queuedOriginalIndices[idx] = 0;
+                queueSize.decrementAndGet();
+                return false;
+            }
+            return true;
         }
-        queuedTypes[idx] = type;
-        extractionTypes[idx] = type;
-        queuedOriginalIndices[idx] = idx;
-        if (!INSTANCE.writeEntityInstance(
-                extractionBuffer + (long) idx * EntityInstance.STRIDE, state, x, y, z)) {
-            queuedTypes[idx] = null;
-            extractionTypes[idx] = null;
-            queuedOriginalIndices[idx] = 0;
-            queueSize.decrementAndGet();
-            return false;
-        }
-        return true;
     }
 
     /**
-     * Reserves a queue slot for {@code type} and returns the address to write its instance
-     * data to, or 0 if the queue is full. Used by the direct-from-{@code Entity} extraction
-     * path, which has no render state to hand to {@link #queueEntityStateDirect}.
+     * Reserves a queue slot for direct extraction. The reservation slot is tracked per
+     * calling thread so rollback cannot accidentally remove another producer's slot.
      */
-    /** Rolls back the most recently reserved slot when direct extraction fails. */
-    public static void releaseReservedInstance(EntityType<?> type) {
-        if (INSTANCE == null) return;
-        int idx = queueSize.get();
-        if (idx <= 0) return;
-        int slot = idx - 1;
-        if (queuedTypes[slot] != type || extractionTypes[slot] != type) return;
-        queuedTypes[slot] = null;
-        extractionTypes[slot] = null;
-        queuedOriginalIndices[slot] = 0;
-        queueSize.decrementAndGet();
-    }
-
     public static long reserveInstance(EntityType<?> type) {
         if (INSTANCE == null) return 0L;
-        int idx = queueSize.getAndIncrement();
-        if (idx >= MAX_QUEUE) {
-            queueSize.decrementAndGet();
-            if (Rentities.IS_DEBUG) {
-                Rentities.LOGGER.warn(
-                        "[Rentities] Instance queue full ({}); falling back to vanilla rendering",
-                        MAX_QUEUE);
+        synchronized (QUEUE_LOCK) {
+            int idx = queueSize.getAndIncrement();
+            if (idx >= MAX_QUEUE) {
+                queueSize.decrementAndGet();
+                if (Rentities.IS_DEBUG) {
+                    Rentities.LOGGER.warn(
+                            "[Rentities] Instance queue full ({}); falling back to vanilla rendering",
+                            MAX_QUEUE);
+                }
+                return 0L;
             }
-            return 0L;
+            queuedTypes[idx] = type;
+            extractionTypes[idx] = type;
+            queuedOriginalIndices[idx] = idx;
+            RESERVED_SLOTS.get().addLast(idx);
+            return extractionBuffer + (long) idx * EntityInstance.STRIDE;
         }
-        queuedTypes[idx] = type;
-        extractionTypes[idx] = type;
-        queuedOriginalIndices[idx] = idx;
-        return extractionBuffer + (long) idx * EntityInstance.STRIDE;
+    }
+
+    /** Rolls back the calling thread's most recent direct-extraction reservation. */
+    public static void releaseReservedInstance(EntityType<?> type) {
+        if (INSTANCE == null) return;
+        synchronized (QUEUE_LOCK) {
+            Deque<Integer> slots = RESERVED_SLOTS.get();
+            Integer slot = slots.peekLast();
+            if (slot == null || slot < 0 || slot >= MAX_QUEUE) return;
+            if (queuedTypes[slot] != type || extractionTypes[slot] != type) return;
+            slots.pollLast();
+            queuedTypes[slot] = null;
+            extractionTypes[slot] = null;
+            queuedOriginalIndices[slot] = 0;
+            // Keep queueSize as a high-water mark. doFlush compacts cancelled slots.
+        }
     }
 
     public static boolean queueEntityState(Object state, double x, double y, double z) {
         if (INSTANCE == null) return false;
-
-        int idx = queueSize.getAndIncrement();
-
-        if (idx >= MAX_QUEUE) {
-            queueSize.decrementAndGet();
-
-            if (Rentities.IS_DEBUG) {
-                Rentities.LOGGER.warn(
-                        "[Rentities] Instance queue full ({}); falling back to vanilla rendering",
-                        MAX_QUEUE);
+        synchronized (QUEUE_LOCK) {
+            int idx = queueSize.getAndIncrement();
+            if (idx >= MAX_QUEUE) {
+                queueSize.decrementAndGet();
+                if (Rentities.IS_DEBUG) {
+                    Rentities.LOGGER.warn(
+                            "[Rentities] Instance queue full ({}); falling back to vanilla rendering",
+                            MAX_QUEUE);
+                }
+                return false;
             }
 
-            return false;
+            EntityType<?> type = getEntityType(state);
+            queuedTypes[idx] = type;
+            extractionTypes[idx] = type;
+            queuedOriginalIndices[idx] = idx;
+
+            if (!INSTANCE.writeEntityInstance(
+                    extractionBuffer + (long) idx * EntityInstance.STRIDE,
+                    state,
+                    x,
+                    y,
+                    z)) {
+                queuedTypes[idx] = null;
+                extractionTypes[idx] = null;
+                queuedOriginalIndices[idx] = 0;
+                queueSize.decrementAndGet();
+                return false;
+            }
+            return true;
         }
-
-        EntityType<?> type = getEntityType(state);
-        queuedTypes[idx] = type;
-        extractionTypes[idx] = type;
-        queuedOriginalIndices[idx] = idx;
-
-        if (!INSTANCE.writeEntityInstance(
-                extractionBuffer + (long) idx * EntityInstance.STRIDE,
-                state,
-                x,
-                y,
-                z)) {
-            queuedTypes[idx] = null;
-            extractionTypes[idx] = null;
-            queuedOriginalIndices[idx] = 0;
-            queueSize.decrementAndGet();
-            return false;
-        }
-
-        return true;
     }
 
     public static void beginWorldRender(Matrix4f positionMatrix, Matrix4f projectionMatrix) {
@@ -320,11 +331,15 @@ public class EntityBatchRenderer {
     
     public static void flushBatch() {
         if (INSTANCE == null) return;
-        INSTANCE.doFlush();
+        synchronized (QUEUE_LOCK) {
+            INSTANCE.doFlush();
+        }
     }
 
     private void doFlush() {
-        int count = Math.min(queueSize.getAndSet(0), MAX_QUEUE);
+        int rawCount = Math.min(queueSize.getAndSet(0), MAX_QUEUE);
+        int count = compactQueue(rawCount);
+        RESERVED_SLOTS.get().clear();
         if (count == 0) return;
 
         // Sort by entity type for contiguous SSBO blocks
@@ -519,6 +534,29 @@ public class EntityBatchRenderer {
     }
 
     private final long[] sortKeys = new long[MAX_QUEUE];
+
+    private int compactQueue(int rawCount) {
+        int write = 0;
+        for (int read = 0; read < rawCount; read++) {
+            if (queuedTypes[read] == null && extractionTypes[read] == null) continue;
+            if (write != read) {
+                queuedTypes[write] = queuedTypes[read];
+                extractionTypes[write] = extractionTypes[read];
+                queuedOriginalIndices[write] = write;
+                MemoryUtil.memCopy(
+                        extractionBuffer + (long) read * EntityInstance.STRIDE,
+                        extractionBuffer + (long) write * EntityInstance.STRIDE,
+                        EntityInstance.STRIDE);
+            }
+            write++;
+        }
+        for (int i = write; i < rawCount; i++) {
+            queuedTypes[i] = null;
+            extractionTypes[i] = null;
+            queuedOriginalIndices[i] = 0;
+        }
+        return write;
+    }
 
     private void clearQueuedReferences(int count) {
         for (int i = 0; i < count; i++) {

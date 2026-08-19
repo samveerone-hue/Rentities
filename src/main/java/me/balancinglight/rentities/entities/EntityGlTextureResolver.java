@@ -27,10 +27,10 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class EntityGlTextureResolver {
 
-    private static Object textureManager;
-    private static Method getTexMethod;
-    private static MethodHandle glTextureGetter;
-    private static MethodHandle glTextureIdGetter;
+    private static volatile Object textureManager;
+    private static volatile Method getTexMethod;
+    private static volatile MethodHandle glTextureGetter;
+    private static volatile MethodHandle glTextureIdGetter;
 
     private static final Map<String, Integer> GL_ID_CACHE = new ConcurrentHashMap<>();
 
@@ -81,7 +81,7 @@ public final class EntityGlTextureResolver {
         glTextureIdGetter = null;
     }
 
-    private static void ensureMethods(Object loc) {
+    private static synchronized void ensureMethods(Object loc) {
         if (textureManager != null && getTexMethod != null) return;
 
         Minecraft mc = Minecraft.getInstance();
@@ -106,7 +106,7 @@ public final class EntityGlTextureResolver {
         }
     }
 
-    private static Object resolveGpuTexture(Object texObj) throws Throwable {
+    private static synchronized Object resolveGpuTexture(Object texObj) throws Throwable {
         if (glTextureGetter != null) {
             return glTextureGetter.invoke(texObj);
         }
@@ -138,7 +138,7 @@ public final class EntityGlTextureResolver {
         return null;
     }
 
-    private static int readGpuTexId(Object gpuTex) throws Throwable {
+    private static synchronized int readGpuTexId(Object gpuTex) throws Throwable {
         if (glTextureIdGetter != null) {
             return (int) glTextureIdGetter.invoke(gpuTex);
         }

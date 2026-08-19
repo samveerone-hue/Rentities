@@ -21,15 +21,30 @@ public final class StandardInstanceBufferBackend implements InstanceBufferBacken
     private final long stagingAddr;
 
     public StandardInstanceBufferBackend(long bytesPerSlot, int slots) {
+        if (bytesPerSlot <= 0 || slots <= 0) {
+            throw new IllegalArgumentException("bytesPerSlot and slots must be positive");
+        }
         this.slots = slots;
         this.slotSize = bytesPerSlot;
-        int align = Math.max(glGetInteger(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT), 256);
+        int queriedAlign = glGetInteger(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT);
+        int align = Math.max(queriedAlign > 0 ? queriedAlign : 256, 256);
         this.stride = ((bytesPerSlot + align - 1) / align) * align;
-        long total = stride * slots;
-        this.id = glCreateBuffers();
-        glNamedBufferStorage(id, total, GL_DYNAMIC_STORAGE_BIT);
-        this.stagingAddr = MemoryUtil.nmemAlloc(total);
-        MemoryUtil.memSet(stagingAddr, 0, total);
+        long total = Math.multiplyExact(stride, (long) slots);
+
+        int createdId = 0;
+        long allocated = 0L;
+        try {
+            createdId = glCreateBuffers();
+            glNamedBufferStorage(createdId, total, GL_DYNAMIC_STORAGE_BIT);
+            allocated = MemoryUtil.nmemAlloc(total);
+            MemoryUtil.memSet(allocated, 0, total);
+        } catch (Throwable t) {
+            if (allocated != 0L) MemoryUtil.nmemFree(allocated);
+            if (createdId != 0) glDeleteBuffers(createdId);
+            throw t;
+        }
+        this.id = createdId;
+        this.stagingAddr = allocated;
     }
 
     public int id() { return id; }
@@ -41,6 +56,12 @@ public final class StandardInstanceBufferBackend implements InstanceBufferBacken
     /** Uploads the exact active instance range; renderer synchronizes shader visibility. */
     public void upload(int slot, long bytes) {
         if (bytes <= 0) return;
+        if (slot < 0 || slot >= slots) {
+            throw new IndexOutOfBoundsException("slot=" + slot + ", slots=" + slots);
+        }
+        if (bytes > slotSize) {
+            throw new IllegalArgumentException("upload exceeds slot size: " + bytes + " > " + slotSize);
+        }
         glNamedBufferSubData(id, offsetOf(slot), MemoryUtil.memByteBuffer(addrOf(slot), Math.toIntExact(bytes)));
     }
 

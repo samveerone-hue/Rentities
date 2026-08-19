@@ -62,13 +62,8 @@ public class MixinLevelRenderer {
     private void extractEntityDirect(Entity entity, float partialTick,
                                      CallbackInfoReturnable<EntityRenderState> cir) {
         if (!Rentities.IS_ENABLED) return;
-        // Camera mods such as Zoomify can update the active camera during the frame.
-        // Refresh the extraction origin immediately before batching so entity positions
-        // stay anchored to the same camera used by the active world render.
-        Vec3 camPos = Minecraft.getInstance().gameRenderer.getMainCamera().position();
-        EntityBatchRenderer.cameraX = camPos.x;
-        EntityBatchRenderer.cameraY = camPos.y;
-        EntityBatchRenderer.cameraZ = camPos.z;
+        // Keep a single camera snapshot for the whole world render pass. Updating cameraX/Y/Z
+        // per entity makes batched entities move when camera mods adjust zoom/camera state mid-pass.
         EntityBatchRenderer.ensurePrepared();
         if (EntityDirectExtractor.tryExtract(entity, partialTick)) {
             cir.setReturnValue(EntityDirectExtractor.SENTINEL);

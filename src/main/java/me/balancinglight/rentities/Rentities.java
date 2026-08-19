@@ -17,7 +17,7 @@ public class Rentities implements ClientModInitializer {
     public static volatile boolean IS_COMPATIBLE = false;
     public static volatile RendererCapabilityState CAPABILITIES;
 
-    public static RentitiesConfig config = RentitiesConfig.loadOrCreate();
+    public static volatile RentitiesConfig config = RentitiesConfig.loadOrCreate();
 
     @Override
     public void onInitializeClient() {
@@ -25,7 +25,7 @@ public class Rentities implements ClientModInitializer {
         // when the first world loads and GL is ready.
     }
 
-    public static void checkAndEnable() {
+    public static synchronized void checkAndEnable() {
         if (CAPABILITIES == null) {
             CAPABILITIES = RendererCapabilityState.probe();
             IS_COMPATIBLE = CAPABILITIES.isProbed();

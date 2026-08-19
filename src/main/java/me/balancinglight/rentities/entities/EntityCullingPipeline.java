@@ -73,10 +73,22 @@ public final class EntityCullingPipeline {
     private long cmdAddr;
 
     public EntityCullingPipeline(int slots, int maxInstances) {
-        this.groupBuffer   = new GpuRingBuffer((long) MAX_GROUPS * GROUP_STRIDE, slots, true);
-        this.cmdBuffer     = new GpuRingBuffer((long) MAX_GROUPS * CMD_STRIDE, slots, true);
-        this.visibleBuffer = new GpuRingBuffer((long) maxInstances * 4, slots, false);
-        compile();
+        GpuRingBuffer gb = null, cb = null, vb = null;
+        try {
+            gb = new GpuRingBuffer((long) MAX_GROUPS * GROUP_STRIDE, slots, true);
+            cb = new GpuRingBuffer((long) MAX_GROUPS * CMD_STRIDE, slots, true);
+            vb = new GpuRingBuffer((long) maxInstances * 4, slots, false);
+            this.groupBuffer = gb;
+            this.cmdBuffer = cb;
+            this.visibleBuffer = vb;
+            compile();
+        } catch (Throwable t) {
+            if (gb != null) gb.delete();
+            if (cb != null) cb.delete();
+            if (vb != null) vb.delete();
+            MemoryUtil.memFree(planeBuffer);
+            throw t;
+        }
     }
 
     private void compile() {

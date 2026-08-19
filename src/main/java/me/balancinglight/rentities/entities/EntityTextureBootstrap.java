@@ -77,6 +77,12 @@ public final class EntityTextureBootstrap {
                 if (finalUpdate != null) {
                     finalUpdate.setAccessible(true);
                     finalUpdate.invoke(renderer, stub, state, 0.0f);
+                } else {
+                    if (Rentities.IS_DEBUG) {
+                        Rentities.LOGGER.warn(
+                                "No compatible updateRenderState method found for {}", type);
+                    }
+                    return null;
                 }
             }
 

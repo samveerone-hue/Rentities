@@ -112,6 +112,7 @@ public class EntityBatchRenderer {
     private int uBaseInstance  = -1;
     private int uIndirect      = -1;
     private int uCameraPos    = -1;
+    private int uSlimeOverlay = -1;
 
     private final EntityMeshBaker meshBaker;
     private final EntityErrorRenderer errorRenderer;
@@ -1072,6 +1073,7 @@ public class EntityBatchRenderer {
             uBaseInstance   = entityShader.getUniformLocation("uBaseInstance");
             uIndirect       = entityShader.getUniformLocation("uIndirect");
             uCameraPos     = entityShader.getUniformLocation("uCameraPos");
+            uSlimeOverlay  = entityShader.getUniformLocation("uSlimeOverlay");
             glUseProgram(0);
         } catch (Exception e) {
             Rentities.LOGGER.error("Entity shader compilation failed", e);

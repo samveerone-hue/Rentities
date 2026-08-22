@@ -125,10 +125,14 @@ public class EntityMeshCapturingConsumer implements VertexConsumer {
     }
 
     @Override
-    public void addVertex(float x, float y, float z, int color, float u, float v, int overlay, int light, float nx, float ny, float nz) { //[cite: 1]
-        float fx = hasPivot ? x - pivotX : x; //[cite: 1]
-        float fy = hasPivot ? y - pivotY : y; //[cite: 1]
-        float fz = hasPivot ? z - pivotZ : z; //[cite: 1]
-        captured.add(new float[]{fx, fy, fz, nx, ny, nz, u, v, currentBone}); //[cite: 1]
+    public void addVertex(float x, float y, float z, int color, float u, float v, int overlay, int light, float nx, float ny, float nz) {
+        float fx = hasPivot ? x - pivotX : x;
+        float fy = hasPivot ? y - pivotY : y;
+        float fz = hasPivot ? z - pivotZ : z;
+
+        // Preserve the exact UV pair supplied by ModelPart.Cube. Do not infer or mirror
+        // coordinates from face winding: vanilla's generated vertex order is the source
+        // of truth for entity texture orientation.
+        captured.add(new float[]{fx, fy, fz, nx, ny, nz, u, v, currentBone});
     }
 }

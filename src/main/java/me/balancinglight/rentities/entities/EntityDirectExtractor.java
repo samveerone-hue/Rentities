@@ -230,60 +230,69 @@ public final class EntityDirectExtractor {
                     0.0f, 0.0f, 0.0f);
 
             if (armorStandState != null) {
+                // Prefer the exact vanilla render-state representation.
                 writeArmorStandPose(
                         ptr + EntityInstance.OFFSET_ARMOR_STAND_HEAD_POSE,
                         armorStandState.headPose);
-
                 writeArmorStandPose(
                         ptr + EntityInstance.OFFSET_ARMOR_STAND_BODY_POSE,
                         armorStandState.bodyPose);
-
                 writeArmorStandPose(
                         ptr + EntityInstance.OFFSET_ARMOR_STAND_LEFT_ARM_POSE,
                         armorStandState.leftArmPose);
-
                 writeArmorStandPose(
                         ptr + EntityInstance.OFFSET_ARMOR_STAND_RIGHT_ARM_POSE,
                         armorStandState.rightArmPose);
-
                 writeArmorStandPose(
                         ptr + EntityInstance.OFFSET_ARMOR_STAND_LEFT_LEG_POSE,
                         armorStandState.leftLegPose);
-
                 writeArmorStandPose(
                         ptr + EntityInstance.OFFSET_ARMOR_STAND_RIGHT_LEG_POSE,
                         armorStandState.rightLegPose);
+            } else {
+                // Renderer-state extraction can fail during renderer/bootstrap transitions.
+                // Never silently revert to the default standing pose: the entity itself is
+                // the authoritative source for /data Pose values.
+                writeArmorStandPose(ptr + EntityInstance.OFFSET_ARMOR_STAND_HEAD_POSE, armorStand.getHeadPose());
+                writeArmorStandPose(ptr + EntityInstance.OFFSET_ARMOR_STAND_BODY_POSE, armorStand.getBodyPose());
+                writeArmorStandPose(ptr + EntityInstance.OFFSET_ARMOR_STAND_LEFT_ARM_POSE, armorStand.getLeftArmPose());
+                writeArmorStandPose(ptr + EntityInstance.OFFSET_ARMOR_STAND_RIGHT_ARM_POSE, armorStand.getRightArmPose());
+                writeArmorStandPose(ptr + EntityInstance.OFFSET_ARMOR_STAND_LEFT_LEG_POSE, armorStand.getLeftLegPose());
+                writeArmorStandPose(ptr + EntityInstance.OFFSET_ARMOR_STAND_RIGHT_LEG_POSE, armorStand.getRightLegPose());
             }
         } else {
             // Non-armor-stand entities have identity armor-stand pose fields.
             clearArmorStandPose(ptr);
 
             if (entity instanceof LivingEntity living) {
+                float headYawAbs = lerpDegrees(
+                        partialTick,
+                        living.yHeadRotO,
+                        living.yHeadRot);
                 bodyYawDeg = lerpDegrees(
                         partialTick,
                         living.yBodyRotO,
                         living.yBodyRot);
 
-                // Vanilla LivingEntityRenderer clamps body yaw before setupTransforms.
-                // Some entities (and camera/AI states) can have body/head yaw divergence;
-                // using raw yBodyRot makes the GPU model face differently from vanilla.
+                // Match LivingEntityRenderer.clampBodyYaw, but keep a deterministic CPU
+                // fallback when private reflection is unavailable.
+                boolean clampedByVanilla = false;
                 try {
                     var renderer = Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(entity);
-                    MethodHandle clamp = livingBodyYawClampHandle(renderer.getClass().getSuperclass());
-                    if (clamp != null) {
-                        // Renderer superclass lookup: LivingEntityRenderer declares the private helper.
-                        Class<?> c = renderer.getClass();
-                        while (c != null) {
-                            clamp = livingBodyYawClampHandle(c);
-                            if (clamp != null) break;
-                            c = c.getSuperclass();
-                        }
+                    MethodHandle clamp = null;
+                    for (Class<?> c = renderer.getClass(); c != null; c = c.getSuperclass()) {
+                        clamp = livingBodyYawClampHandle(c);
+                        if (clamp != null) break;
                     }
                     if (clamp != null) {
                         bodyYawDeg = (float) clamp.invokeWithArguments(living, bodyYawDeg, partialTick);
+                        clampedByVanilla = true;
                     }
                 } catch (Throwable ignored) {
-                    // Fall back to interpolated body yaw if a renderer does not expose vanilla clamp.
+                    // Apply the equivalent clamp below.
+                }
+                if (!clampedByVanilla) {
+                    bodyYawDeg = clampBodyYaw(bodyYawDeg, headYawAbs);
                 }
 
                 limbSwing = living.walkAnimation.position(partialTick);
@@ -292,11 +301,7 @@ public final class EntityDirectExtractor {
                         1.0f);
 
                 headYawRel = (float) Math.toRadians(
-                        wrapDegrees(
-                                lerpDegrees(
-                                        partialTick,
-                                        living.yHeadRotO,
-                                        living.yHeadRot) - bodyYawDeg));
+                        wrapDegrees(headYawAbs - bodyYawDeg));
 
                 headPitchRel =
                         (float) Math.toRadians(
@@ -685,6 +690,13 @@ public final class EntityDirectExtractor {
 
     private static float lerpDegrees(float t, float from, float to) {
         return from + wrapDegrees(to - from) * t;
+    }
+
+    private static float clampBodyYaw(float bodyYaw, float headYaw) {
+        float diff = wrapDegrees(bodyYaw - headYaw);
+        if (diff > 75.0f) return headYaw + 75.0f;
+        if (diff < -75.0f) return headYaw - 75.0f;
+        return bodyYaw;
     }
 
     private static float wrapDegrees(float deg) {

@@ -1,6 +1,6 @@
 #version 460 core
 
-const int FLAG_SLIME = 1;
+const int FLAG_SLIME = 1024;
 const int FLAG_MAGMA_CUBE = 2;
 
 

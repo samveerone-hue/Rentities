@@ -864,6 +864,20 @@ public class EntityBatchRenderer {
         }
     }
 
+    private static float clampBodyYaw(float bodyYaw, float headYaw) {
+        float diff = wrapDegrees(bodyYaw - headYaw);
+        if (diff > 75.0f) return headYaw + 75.0f;
+        if (diff < -75.0f) return headYaw - 75.0f;
+        return bodyYaw;
+    }
+
+    private static float wrapDegrees(float deg) {
+        float d = deg % 360f;
+        if (d >= 180f) d -= 360f;
+        if (d < -180f) d += 360f;
+        return d;
+    }
+
     private static final ClassValue<StateAccessor> ACCESSOR_CACHE = new ClassValue<>() {
         @Override protected StateAccessor computeValue(Class<?> type) { return new StateAccessor(type); }
     };
@@ -931,52 +945,34 @@ public class EntityBatchRenderer {
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_POSITION_Y, (float) ry);
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_POSITION_Z, (float) rz);
 
-            // Fetch partialTick for interpolation
             float partialTick = Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(true);
-
-            // 1. Interpolate Body Yaw
-            float yawDeg = acc.yaw != null ? (float) invokeAccessor(acc.yaw, state) : 0f;
-            if (acc.yawO != null) {
-                float yawODeg = (float) invokeAccessor(acc.yawO, state);
-                yawDeg = net.minecraft.util.Mth.rotLerp(partialTick, yawODeg, yawDeg);
-            }
-            float rotY = (float)Math.toRadians(180.0f - yawDeg);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ROTATION_Y, rotY);
 
             EntityType<?> type = acc.type != null ? (EntityType<?>) invokeAccessor(acc.type, state) : null;
             boolean isArmorStand = (type == EntityType.ARMOR_STAND);
 
-            float limbSwing    = 0f;
-            float limbSwingAmt = 0f;
-            float headYawRel   = 0f;
-            float headPitchRel = 0f;
-            float attackProgress = 0f;
-            float swimProgress   = 0f;
-            float sneakProg      = 0f;
-            float deathTime      = 0f;
-            float hurtTime       = 0f;
+            float headYawDeg = 0f;
+            if (!isArmorStand && acc.headYaw != null) {
+                headYawDeg = (float) invokeAccessor(acc.headYaw, state);
+                if (acc.headYawO != null) {
+                    float headYawO = (float) invokeAccessor(acc.headYawO, state);
+                    headYawDeg = net.minecraft.util.Mth.rotLerp(partialTick, headYawO, headYawDeg);
+                }
+            }
 
+            float bodyYawDeg = acc.yaw != null ? (float) invokeAccessor(acc.yaw, state) : 0f;
+            if (acc.yawO != null) {
+                float yawODeg = (float) invokeAccessor(acc.yawO, state);
+                bodyYawDeg = net.minecraft.util.Mth.rotLerp(partialTick, yawODeg, bodyYawDeg);
+            }
+            if (!isArmorStand) bodyYawDeg = clampBodyYaw(bodyYawDeg, headYawDeg);
+
+            float rotY = (float) Math.toRadians(180.0f - bodyYawDeg);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ROTATION_Y, rotY);
+
+            float headYawRel = 0f;
+            float headPitchRel = 0f;
             if (!isArmorStand) {
-                if (acc.limbSwing != null) limbSwing = (float) invokeAccessor(acc.limbSwing, state);
-                if (acc.limbSwingAmt != null) {
-                    float raw = (float) invokeAccessor(acc.limbSwingAmt, state);
-                    limbSwingAmt = raw < 0f ? 0f : raw > 1f ? 1f : raw;
-                }
-                
-                // 2. Interpolate Head Yaw & Calculate Relative Angle
-                if (acc.headYaw != null) {
-                    float absHeadYaw = (float) invokeAccessor(acc.headYaw, state);
-                    if (acc.headYawO != null) {
-                        float absHeadYawO = (float) invokeAccessor(acc.headYawO, state);
-                        absHeadYaw = net.minecraft.util.Mth.rotLerp(partialTick, absHeadYawO, absHeadYaw);
-                    }
-                    float relDeg = absHeadYaw - yawDeg;
-                    while (relDeg >  180f) relDeg -= 360f;
-                    while (relDeg < -180f) relDeg += 360f;
-                    headYawRel = (float) Math.toRadians(relDeg);
-                }
-                
-                // 3. Interpolate Head Pitch
+                headYawRel = (float) Math.toRadians(wrapDegrees(headYawDeg - bodyYawDeg));
                 if (acc.headPitch != null) {
                     float pitchDeg = (float) invokeAccessor(acc.headPitch, state);
                     if (acc.headPitchO != null) {
@@ -985,93 +981,78 @@ public class EntityBatchRenderer {
                     }
                     headPitchRel = (float) Math.toRadians(pitchDeg);
                 }
+            }
+
+            float limbSwing = 0f, limbSwingAmt = 0f, attackProgress = 0f, swimProgress = 0f;
+            float sneakProg = 0f, deathTime = 0f, hurtTime = 0f;
+            if (!isArmorStand) {
+                if (acc.limbSwing != null) limbSwing = (float) invokeAccessor(acc.limbSwing, state);
+                if (acc.limbSwingAmt != null) {
+                    float raw = (float) invokeAccessor(acc.limbSwingAmt, state);
+                    limbSwingAmt = raw < 0f ? 0f : raw > 1f ? 1f : raw;
+                }
                 if (acc.attackProgress != null) attackProgress = (float) invokeAccessor(acc.attackProgress, state);
-                if (acc.swimProgress   != null) swimProgress   = (float) invokeAccessor(acc.swimProgress, state);
-                if (acc.sneaking       != null && (boolean) invokeAccessor(acc.sneaking, state)) sneakProg = 1f;
-                if (acc.hurtTime       != null && (boolean) invokeAccessor(acc.hurtTime, state))  hurtTime  = 10f;
-                if (acc.deathTime      != null) {
+                if (acc.swimProgress != null) swimProgress = (float) invokeAccessor(acc.swimProgress, state);
+                if (acc.sneaking != null && (boolean) invokeAccessor(acc.sneaking, state)) sneakProg = 1f;
+                if (acc.hurtTime != null && (boolean) invokeAccessor(acc.hurtTime, state)) hurtTime = 10f;
+                if (acc.deathTime != null) {
                     float raw = (float) invokeAccessor(acc.deathTime, state);
                     if (raw >= 0f && raw <= 20f) deathTime = raw;
                 }
             }
 
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_LIMB_SWING,      limbSwing);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_LIMB_SWING_AMT,  limbSwingAmt);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_HEAD_YAW,        headYawRel);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_HEAD_PITCH,      headPitchRel);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_LIMB_SWING, limbSwing);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_LIMB_SWING_AMT, limbSwingAmt);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_HEAD_YAW, headYawRel);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_HEAD_PITCH, headPitchRel);
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ATTACK_PROGRESS, attackProgress);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_BOW_PULL,        0f);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_HURT_TIME,       hurtTime);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_DEATH_TIME,      deathTime);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SNEAK_PROGRESS,  sneakProg);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SWIM_PROGRESS,   swimProgress);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_RIPTIDE,         0f);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SIT_PROGRESS,    0f);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_EAT_PROGRESS,    0f);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SWELL_AMOUNT,    0f);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_EXPLODE_PROGRESS,0f);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ROLL_PROGRESS,   0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_BOW_PULL, 0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_HURT_TIME, hurtTime);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_DEATH_TIME, deathTime);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SNEAK_PROGRESS, sneakProg);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SWIM_PROGRESS, swimProgress);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_RIPTIDE, 0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SIT_PROGRESS, 0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_EAT_PROGRESS, 0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SWELL_AMOUNT, 0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_EXPLODE_PROGRESS, 0f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_ROLL_PROGRESS, 0f);
 
             int flags = 0;
-
-            if (acc.invisible != null && (boolean) invokeAccessor(acc.invisible, state)) {
-                flags |= EntityInstance.FLAG_IS_INVISIBLE;
-            }
-
-            if (acc.onGround != null && (boolean) invokeAccessor(acc.onGround, state)) {
-                flags |= EntityInstance.FLAG_ON_GROUND;
-            }
-
-            if (acc.inWater != null && (boolean) invokeAccessor(acc.inWater, state)) {
-                flags |= EntityInstance.FLAG_IS_IN_WATER;
-            }
-
-            if (type == EntityType.PLAYER) {
-                flags |= EntityInstance.FLAG_IS_PLAYER;
-            }
-
-            if (type != null && EntityBatchRegistry.hasZombieArms(type)) {
-                flags |= EntityInstance.FLAG_ZOMBIE_ARMS;
-            }
-
-            if (type == EntityType.ARMOR_STAND) {
-                flags |= EntityInstance.FLAG_ARMOR_STAND;
-            }
-
+            if (acc.invisible != null && (boolean) invokeAccessor(acc.invisible, state)) flags |= EntityInstance.FLAG_IS_INVISIBLE;
+            if (acc.onGround != null && (boolean) invokeAccessor(acc.onGround, state)) flags |= EntityInstance.FLAG_ON_GROUND;
+            if (acc.inWater != null && (boolean) invokeAccessor(acc.inWater, state)) flags |= EntityInstance.FLAG_IS_IN_WATER;
+            if (type == EntityType.PLAYER) flags |= EntityInstance.FLAG_IS_PLAYER;
+            if (type != null && EntityBatchRegistry.hasZombieArms(type)) flags |= EntityInstance.FLAG_ZOMBIE_ARMS;
+            if (type == EntityType.ARMOR_STAND) flags |= EntityInstance.FLAG_ARMOR_STAND;
             MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_FLAGS, flags);
 
-            int typeIdx  = type != null ? EntityBatchRegistry.getEntityTypeIndex(type) : 0;
+            int typeIdx = type != null ? EntityBatchRegistry.getEntityTypeIndex(type) : 0;
             EntityAnimationCategory cat = type != null ? EntityBatchRegistry.getCategory(type) : EntityAnimationCategory.CPU_ANIMATED;
-            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ENTITY_TYPE,   typeIdx);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ENTITY_TYPE, typeIdx);
             MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ANIM_CATEGORY, cat.glslId);
             MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_TEXTURE_LAYER, 0);
-
-            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_HELD_MAIN,       EntityInstance.NO_ITEM);
-            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_HELD_OFFHAND,    EntityInstance.NO_ITEM);
-            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_HEAD,      EntityInstance.NO_ARMOR);
-            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_CHEST,     EntityInstance.NO_ARMOR);
-            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_LEGS,      EntityInstance.NO_ARMOR);
-            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_FEET,      EntityInstance.NO_ARMOR);
-            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_MOUNT_ID,        EntityInstance.NO_MOUNT);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_HELD_MAIN, EntityInstance.NO_ITEM);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_HELD_OFFHAND, EntityInstance.NO_ITEM);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_HEAD, EntityInstance.NO_ARMOR);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_CHEST, EntityInstance.NO_ARMOR);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_LEGS, EntityInstance.NO_ARMOR);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_ARMOR_FEET, EntityInstance.NO_ARMOR);
+            MemoryUtil.memPutInt(ptr + EntityInstance.OFFSET_MOUNT_ID, EntityInstance.NO_MOUNT);
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SEAT_OFFSET_X, 0f);
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SEAT_OFFSET_Y, 0f);
             MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_SEAT_OFFSET_Z, 0f);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_TEX_SCALE_X,   1f);
-            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_TEX_SCALE_Y,   1f);
-
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_TEX_SCALE_X, 1f);
+            MemoryUtil.memPutFloat(ptr + EntityInstance.OFFSET_TEX_SCALE_Y, 1f);
+            return true;
         } catch (Exception e) {
             if (Rentities.IS_DEBUG) {
-                Rentities.LOGGER.warn(
-                        "[Rentities] Failed to extract entity instance data for {}",
-                        state != null ? state.getClass().getName() : "null",
-                        e);
+                Rentities.LOGGER.warn("[Rentities] Failed to extract entity instance data for {}",
+                    state != null ? state.getClass().getName() : "null", e);
             }
-
             MemoryUtil.memSet(ptr, 0, EntityInstance.STRIDE);
             return false;
         }
-
-        return true;
     }
 
     @SuppressWarnings("unchecked")

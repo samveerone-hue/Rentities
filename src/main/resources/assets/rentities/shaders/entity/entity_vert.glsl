@@ -1,6 +1,6 @@
 #version 460 core
 
-const int FLAG_SLIME = 1;
+const int FLAG_SLIME = 1024;
 const int FLAG_MAGMA_CUBE = 2;
 
 
@@ -248,11 +248,16 @@ mat4 scaleMat(vec3 s) {
  * coordinates instead of hardcoding humanoid geometry in the shader.
  */
 vec3 getP(EntityInstance inst, int boneIndex) {
+    // The CPU explicitly stores the head pivot at offset 144. Use it as the
+    // authoritative head pivot; this avoids subtle drift if the generic pivot
+    // table was populated from a parent/root transform. Other bones use the
+    // baked per-entity pivot table.
+    if (boneIndex == BONE_HEAD) {
+        return vec3(inst.headPivotX, inst.headPivotY, inst.headPivotZ);
+    }
+
     const int MAX_BONES = 10;
-
-    int pivotIndex =
-        inst.entityTypeIndex * MAX_BONES + boneIndex;
-
+    int pivotIndex = inst.entityTypeIndex * MAX_BONES + boneIndex;
     return bonePivots[pivotIndex].xyz;
 }
 
@@ -275,6 +280,10 @@ mat4 pivotRot(vec3 p, mat4 r) {
  * and apply that around the exact bone pivot captured in the baked mesh.
  */
 mat4 armorStandRotation(vec4 pose) {
+    // ModelPart's Euler angles are stored as pitch(X), yaw(Y), roll(Z).
+    // Vanilla applies the rotations in Z -> Y -> X order to the vector.
+    // With column vectors, that is composed as Rx * Ry * Rz because the
+    // right-most matrix is applied first.
     return rotX(pose.x) * rotY(pose.y) * rotZ(pose.z);
 }
 
@@ -320,75 +329,77 @@ mat4 getArmorStandBone(int b, EntityInstance inst) {
     return mat4(1.0);
 }
 
-// --- BIPED ---
+// --- BIPED / HUMANOID ---
 mat4 getBipedBone(int b, EntityInstance inst) {
     float sw = inst.limbSwing;
-    float sa = inst.limbSwingAmount * gAnimationAmountScale;
-
-    // Vanilla HumanoidModel uses cosine with a PI phase offset for the
-    // right-side limbs. Using sine here made every biped's walk cycle visibly
-    // phase-shifted compared with vanilla.
-    float w1 = sa > 0.01
-        ? gWalkCos * 1.4 * sa
-        : 0.0;
-
-    float w2 = sa > 0.01
-        ? (-gWalkCos) * 1.4 * sa
-        : 0.0;
-
+    float sa = clamp(inst.limbSwingAmount, 0.0, 1.0) * gAnimationAmountScale;
     vec3 p = getP(inst, b);
+
+    // HumanoidModel's canonical walk cycle:
+    //   left  = cos(limbSwing * 0.6662) * 1.4 * amount
+    //   right = cos(limbSwing * 0.6662 + PI) * 1.4 * amount
+    float leftWalk  = cos(sw * 0.6662) * 1.4 * sa;
+    float rightWalk = cos(sw * 0.6662 + PI) * 1.4 * sa;
+
+    // Attack animation is evaluated on the arm bones after walking. We do not
+    // have the complete vanilla arm pose state in the SSBO, so use the same
+    // cubic/sine envelope that vanilla uses for swing strength and layer it on
+    // top of the walk cycle instead of replacing the walk animation.
+    float attack = clamp(inst.attackProgress, 0.0, 1.0) * gAnimationAmountScale;
+    float attackSin = sin(attack * PI);
+    float attackSquared = attack * attack;
+    float attackEnvelope = sin((1.0 - (1.0 - attackSquared) * (1.0 - attackSquared)) * PI);
+    float attackPitch = -attackSin * 1.2;
+    float attackYaw = attackSin * 0.4;
+    float attackRoll = attackEnvelope * 0.15;
 
     if (b == BONE_HEAD) {
         mat4 r = rotY(inst.headYaw) * rotX(inst.headPitch);
-
-        if (inst.sneakProgress > 0.0)
+        if (inst.sneakProgress > 0.0) {
+            // Vanilla crouch pitches the humanoid model forward. Keep this on
+            // the head bone so it remains centered on the baked head pivot.
             r = rotX(0.5) * r;
-
+        }
         return pivotRot(p, r);
     }
 
     if (b == BONE_BODY) {
-        vec3 sp = vec3(p.x, p.y - 12.0, p.z);
-        mat4 m = mat4(1.0);
-
+        mat4 r = mat4(1.0);
         if (inst.sneakProgress > 0.0)
-            m = pivotRot(sp, rotX(0.5));
-
+            r = rotX(0.5) * r;
+        if (inst.swimProgress > 0.0)
+            r = rotX(-0.5 * clamp(inst.swimProgress, 0.0, 1.0)) * r;
         if (inst.deathTime > 0.0) {
-            float t = min(inst.deathTime / 20.0, 1.0);
-            m = pivotRot(sp, rotZ(t * PI * 0.5)) * m;
+            float t = clamp(inst.deathTime / 20.0, 0.0, 1.0);
+            r = rotZ(t * PI * 0.5) * r;
+        }
+        return pivotRot(p, r);
+    }
+
+    if (b == BONE_ARM_L || b == BONE_ARM_R) {
+        bool left = (b == BONE_ARM_L);
+        float walk = left ? leftWalk : rightWalk;
+        float attackSign = left ? 1.0 : -1.0;
+        float zombieBase = 0.0;
+
+        if ((inst.flags & FLAG_ZOMBIE_ARMS) != 0) {
+            // Zombie-style arms are held forward; walking is retained only as
+            // a small sway when the entity is not attacking.
+            zombieBase = -PI * 0.5;
+            if (attack <= 0.0) walk *= 0.15;
         }
 
-        return m;
-    }
-
-    if (b == BONE_ARM_L) {
-        float tilt =
-            ((inst.flags & FLAG_ZOMBIE_ARMS) != 0)
-                ? -PI * 0.5
-                : 0.0;
-
-        return pivotRot(
-            p,
-            rotX(w2 + tilt));
-    }
-
-    if (b == BONE_ARM_R) {
-        float tilt =
-            ((inst.flags & FLAG_ZOMBIE_ARMS) != 0)
-                ? -PI * 0.5
-                : 0.0;
-
-        return pivotRot(
-            p,
-            rotX(w1 + tilt));
+        float pitch = walk + zombieBase + attackPitch;
+        float yaw = attackSign * attackYaw;
+        float roll = attackSign * attackRoll;
+        return pivotRot(p, rotZ(roll) * rotY(yaw) * rotX(pitch));
     }
 
     if (b == BONE_LEG_L)
-        return pivotRot(p, rotX(w1));
+        return pivotRot(p, rotX(leftWalk));
 
     if (b == BONE_LEG_R)
-        return pivotRot(p, rotX(w2));
+        return pivotRot(p, rotX(rightWalk));
 
     return mat4(1.0);
 }
@@ -672,16 +683,16 @@ mat4 getSwimmingBone(int b, EntityInstance inst) {
 
 // --- SLIME ---
 mat4 getSlimeBone(int b, EntityInstance inst) {
+    // Slime squish/stretch is already measured on the CPU from Slime#oSquish /
+    // #squish. The small procedural term preserves the vanilla-looking bounce
+    // while avoiding a second, conflicting size calculation.
     float t = uGameTime * 0.1;
-    float sa = inst.limbSwingAmount * gAnimationAmountScale;
-    float bounce =
-        abs(sin(t * 3.0 + inst.limbSwing));
-
-    return scaleMat(
-        vec3(
-            1.0 + bounce * 0.3 * sa,
-            1.0 - bounce * 0.3 * sa,
-            1.0 + bounce * 0.3 * sa));
+    float sa = clamp(inst.limbSwingAmount, 0.0, 1.0) * gAnimationAmountScale;
+    float bounce = abs(sin(t * 3.0 + inst.limbSwing));
+    float wobble = bounce * 0.04 * sa;
+    vec3 p = getP(inst, b);
+    mat4 r = scaleMat(vec3(1.0 + wobble, 1.0 - wobble, 1.0 + wobble));
+    return pivotRot(p, r);
 }
 
 // --- FLOATING ---
@@ -1012,10 +1023,14 @@ void main() {
     int lod = getAnimationLod(vec3(inst.posX, inst.posY, inst.posZ));
     gAnimationAmountScale = lod == 1 ? clamp(uAnimationLodMediumScale, 0.0, 1.0) : 1.0;
 
-    int bone = int(aBoneIndex);
+    int bone = clamp(int(aBoneIndex), 0, 9);
 
     /*
-     * Per-bone transform — applied to both position and normal.
+     * Per-bone transform — applied to both position and normal. The mesh baker
+     * supplies bind-pose/model-space vertices and the pivot SSBO stores the exact
+     * ModelPart pivot in that same 16-pixel coordinate system. Using T(p) * R *
+     * T(-p) here therefore reproduces vanilla bone rotation without introducing a
+     * second pivot offset.
      *
      * Armor-stand poses are already baked into bt from the six per-instance
      * rotation slots. Other entity categories keep their existing procedural
@@ -1026,7 +1041,8 @@ void main() {
             inst.animationCategory,
             bone,
             inst);
-    if (lod >= 2 && bone != BONE_HEAD) {
+    if (lod >= 2 && bone != BONE_HEAD &&
+        (inst.flags & FLAG_ARMOR_STAND) == 0) {
         bt = mat4(1.0);
     }
 
@@ -1061,8 +1077,10 @@ void main() {
 
     if ((inst.materialFlags & FLAG_SLIME) != 0) {
         float shell = (uSlimeOverlay != 0) ? 1.06 : 1.0;
-        rotPos.xz *= max(inst.slimeScaleXZ * shell, 0.01);
-        rotPos.y *= max(inst.slimeScaleY * shell, 0.01);
+        float sxz = max(inst.slimeScaleXZ, 0.01) * shell;
+        float sy  = max(inst.slimeScaleY, 0.01) * shell;
+        rotPos.xz *= sxz;
+        rotPos.y  *= sy;
     }
 
     // Pixels -> blocks (x0.0625) + camera-relative world position

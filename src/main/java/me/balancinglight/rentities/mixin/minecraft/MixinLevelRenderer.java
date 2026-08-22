@@ -68,6 +68,7 @@ public class MixinLevelRenderer {
         EntityBatchRenderer.ensurePrepared();
         if (EntityDirectExtractor.tryExtract(entity, partialTick)) {
             cir.setReturnValue(EntityDirectExtractor.SENTINEL);
+            cir.cancel();
         }
     }
 

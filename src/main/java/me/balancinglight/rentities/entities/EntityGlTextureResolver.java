@@ -1,6 +1,7 @@
 package me.balancinglight.rentities.entities;
 
 import com.mojang.blaze3d.systems.RenderSystem;
+import org.lwjgl.opengl.GL11;
 
 import me.balancinglight.rentities.Rentities;
 import net.minecraft.client.Minecraft;

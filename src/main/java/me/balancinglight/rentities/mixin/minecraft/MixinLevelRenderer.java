@@ -48,6 +48,7 @@ public class MixinLevelRenderer {
             @Coerce Object fogColor,
             boolean renderSky,
             CallbackInfo ci) {
+        EntityDirectExtractor.resetSkipBatching();
         if (!Rentities.IS_ENABLED || EntityBatchRenderer.INSTANCE == null) return;
 
         Vec3 camPos = camera.position();

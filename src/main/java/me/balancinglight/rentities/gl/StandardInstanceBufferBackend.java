@@ -62,7 +62,7 @@ public final class StandardInstanceBufferBackend implements InstanceBufferBacken
         if (bytes > slotSize) {
             throw new IllegalArgumentException("upload exceeds slot size: " + bytes + " > " + slotSize);
         }
-        glNamedBufferSubData(id, offsetOf(slot), MemoryUtil.memByteBuffer(addrOf(slot), Math.toIntExact(bytes)));
+        org.lwjgl.opengl.GL45C.nglNamedBufferSubData(id, offsetOf(slot), bytes, addrOf(slot));
     }
 
     public void delete() {

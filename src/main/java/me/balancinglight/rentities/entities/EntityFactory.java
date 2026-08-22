@@ -15,7 +15,12 @@ public class EntityFactory {
 
     public static Entity getOrCreateDummy(EntityType<?> type) {
         if (type == null) return null;
-        return DUMMY_CACHE.computeIfAbsent(type, EntityFactory::createDummy);
+        Entity cached = DUMMY_CACHE.get(type);
+        if (cached != null) return cached;
+        Entity created = createDummy(type);
+        if (created == null) return null;
+        Entity prior = DUMMY_CACHE.putIfAbsent(type, created);
+        return prior != null ? prior : created;
     }
 
     private static Object findPreferredSpawnReason(Class<?> enumType) {

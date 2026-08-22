@@ -67,7 +67,12 @@ public final class GpuFenceRing {
 
     /** Records that all commands issued so far must complete before {@code slot} is reused. */
     public void signal(int slot) {
-        if (fences[slot] != 0L) glDeleteSync(fences[slot]);
+        if (slot < 0 || slot >= fences.length) {
+            throw new IndexOutOfBoundsException("slot " + slot + " / " + fences.length);
+        }
+        if (fences[slot] != 0L) {
+            waitFor(slot);
+        }
         fences[slot] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     }
 

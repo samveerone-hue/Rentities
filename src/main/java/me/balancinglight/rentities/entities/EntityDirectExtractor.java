@@ -73,6 +73,10 @@ public final class EntityDirectExtractor {
         }
     }
 
+    public static void resetSkipBatching() {
+        SKIP_BATCHING_DEPTH.remove();
+    }
+
     public static boolean isSkippingBatching() {
         return SKIP_BATCHING_DEPTH.get() > 0;
     }

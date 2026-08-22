@@ -121,6 +121,7 @@ public abstract class MixinEntityRenderDispatcher {
             }
 
             if (entityRenderer == null) {
+                renderer.entityTexFailed.add(type);
                 if (Rentities.IS_DEBUG) Rentities.LOGGER.warn(
                         "Could not find renderer for {} in EntityRenderDispatcher map", type);
                 return;

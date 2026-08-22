@@ -33,22 +33,35 @@ public final class EntityGlTextureResolver {
     private static volatile MethodHandle glTextureIdGetter;
 
     private static final Map<String, Integer> GL_ID_CACHE = new ConcurrentHashMap<>();
+    private static final Map<String, Object> GL_TEXTURE_OBJECT_CACHE = new ConcurrentHashMap<>();
 
     private EntityGlTextureResolver() {}
 
-    public static int resolveGlId(Object loc) {
+        private static Object resolveGpuTextureObject(Object loc) {
+        try {
+            if (textureManager == null || getTexMethod == null) return null;
+            return getTexMethod.invoke(textureManager, loc);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+public static int resolveGlId(Object loc) {
         if (loc == null) return 0;
         // OpenGL texture queries are only valid while the client render context is current.
         if (!RenderSystem.isOnRenderThread()) return 0;
 
         String key = String.valueOf(loc);
         Integer cached = GL_ID_CACHE.get(key);
-        if (cached != null) {
-            if (org.lwjgl.opengl.GL11.glIsTexture(cached)) return cached;
-            GL_ID_CACHE.remove(key, cached);
+        Object cachedTexture = GL_TEXTURE_OBJECT_CACHE.get(key);
+        if (cached != null && cachedTexture != null && cached > 0 && GL11.glIsTexture(cached)) {
+            Object currentTexture = resolveGpuTextureObject(loc);
+            if (currentTexture != null && currentTexture == cachedTexture) {
+                return cached;
+            }
         }
 
-        try {
+try {
             ensureMethods(loc);
             if (textureManager == null || getTexMethod == null) return 0;
 
@@ -61,6 +74,10 @@ public final class EntityGlTextureResolver {
             int glId = readGpuTexId(gpuTex);
             if (glId > 0 && org.lwjgl.opengl.GL11.glIsTexture(glId)) {
                 GL_ID_CACHE.put(key, glId);
+                Object currentTexture = resolveGpuTextureObject(loc);
+                if (currentTexture != null) {
+                    GL_TEXTURE_OBJECT_CACHE.put(key, currentTexture);
+                }
                 return glId;
             }
         } catch (Throwable t) {
@@ -75,6 +92,7 @@ public final class EntityGlTextureResolver {
 
     public static void invalidateCache() {
         GL_ID_CACHE.clear();
+        GL_TEXTURE_OBJECT_CACHE.clear();
         textureManager = null;
         getTexMethod = null;
         glTextureGetter = null;

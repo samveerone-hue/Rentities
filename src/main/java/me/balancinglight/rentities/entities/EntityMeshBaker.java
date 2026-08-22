@@ -16,6 +16,7 @@ import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
+import java.util.Collections;
 import java.util.*;
 import java.util.concurrent.*;
 import java.nio.file.*;
@@ -843,7 +844,7 @@ public class EntityMeshBaker {
                 bonePivotWritten, newTypes * MAX_BONES);
     }
 
-    private void clearBonePivotSlot(int typeIndex) {
+    private synchronized void clearBonePivotSlot(int typeIndex) {
         if (typeIndex < 0) return;
         ensurePivotCapacity(typeIndex);
         int start = typeIndex * MAX_BONES;
@@ -1016,7 +1017,9 @@ public class EntityMeshBaker {
     }
 
     public int getVaoId() { return gpuMesh.vao(); }
-    public Map<EntityType<?>, MeshInfo> getMeshInfoMap() { return meshInfoMap; }
+    public synchronized Map<EntityType<?>, MeshInfo> getMeshInfoMap() {
+        return Collections.unmodifiableMap(new LinkedHashMap<>(meshInfoMap));
+    }
     public boolean isBaked() { return bakeState == BakeState.READY; }
     public BakeState getBakeState() { return bakeState; }
 
@@ -1062,7 +1065,7 @@ public class EntityMeshBaker {
      * Serialises the baked mesh data to disk.
      * Call after bake() succeeds.
      */
-    public void saveToCache() {
+    public synchronized void saveToCache() {
         final java.io.File target = getCacheFile(); // resolve while Minecraft is on the render thread
         Map<EntityType<?>, CpuMesh> snapshot = snapshotCpuMeshes();
         final float[] pivotDataSnapshot = Arrays.copyOf(bonePivotData, bonePivotData.length);

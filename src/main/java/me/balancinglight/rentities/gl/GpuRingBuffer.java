@@ -37,6 +37,13 @@ public final class GpuRingBuffer {
     private final long baseAddr;
 
     public GpuRingBuffer(long bytesPerSlot, int slots, boolean hostVisible) {
+        if (bytesPerSlot <= 0) {
+            throw new IllegalArgumentException("bytesPerSlot must be > 0");
+        }
+        if (slots <= 0) {
+            throw new IllegalArgumentException("slots must be > 0");
+        }
+
         this.slots = slots;
         this.slotSize = bytesPerSlot;
         int align = Math.max(glGetInteger(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT), 256);
